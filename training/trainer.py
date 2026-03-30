@@ -333,10 +333,11 @@ class PPOTrainer:
     def _export_onnx(self, agent_id: str):
         """Export agent's actor network to ONNX for Node.js inference."""
         agent = self.agents[agent_id]
-        actor = ActorOnly(agent.model).to(DEVICE)
+        # Move to CPU for export to avoid external data files
+        actor = ActorOnly(agent.model).cpu()
         actor.eval()
 
-        dummy = torch.randn(1, STATE_DIM).to(DEVICE)
+        dummy = torch.randn(1, STATE_DIM)
         onnx_path = MODELS_DIR / f"{agent_id}.onnx"
 
         torch.onnx.export(
@@ -348,7 +349,17 @@ class PPOTrainer:
             dynamic_axes={"state": {0: "batch"}, "action": {0: "batch"}},
             opset_version=14,
         )
-        actor.train()
+
+        # Remove any external data file (force all weights inline)
+        data_path = MODELS_DIR / f"{agent_id}.onnx.data"
+        if data_path.exists():
+            import onnx
+            model = onnx.load(str(onnx_path))
+            onnx.save(model, str(onnx_path))  # Re-save with embedded weights
+            data_path.unlink()
+
+        # Move model back to training device
+        agent.model.to(DEVICE)
 
     def _save_checkpoint(self, agent_id: str):
         """Save model weights for persistence."""
