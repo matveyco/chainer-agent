@@ -36,6 +36,7 @@ const config = JSON.parse(
 
 // Apply environment variable overrides
 config.server.endpoint = process.env.GAME_SERVER_URL || null;
+config.trainerUrl = process.env.TRAINER_URL || "http://localhost:5555";
 if (process.env.ROOM_NAME) config.server.roomName = process.env.ROOM_NAME;
 if (process.env.MAP_NAME) config.server.mapName = process.env.MAP_NAME;
 if (process.env.WEAPON_TYPE) config.server.weaponType = process.env.WEAPON_TYPE;

@@ -1,47 +1,53 @@
 /**
  * Transforms raw game state into a normalized input vector for the neural network.
  *
- * 14 inputs:
- *  0: own health (0-1)
- *  1: own X position (clamped ±1, normalized by arena size)
- *  2: own Z position (clamped ±1)
- *  3: distance to nearest enemy (0-1)
- *  4: angle to nearest enemy (sin)
- *  5: angle to nearest enemy (cos)
- *  6: nearest enemy health (0-1)
- *  7: nearby enemy count (0-1, /10)
- *  8: distance from arena center (0-1)
- *  9: cooldown active (0 or 1)
- * 10: own velocity X (-1 to 1)
- * 11: own velocity Z (-1 to 1)
- * 12: has target in range (0 or 1)
- * 13: moving toward/away from enemy (dot product, -1 to 1)
+ * 18 inputs (must match Python trainer STATE_DIM):
+ *   0: own health (0-1)
+ *   1: own X position (clamped ±1)
+ *   2: own Z position (clamped ±1)
+ *   3: distance to nearest enemy (0-1)
+ *   4: angle to nearest enemy (sin)
+ *   5: angle to nearest enemy (cos)
+ *   6: nearest enemy health (0-1)
+ *   7: nearby enemy count (0-1)
+ *   8: distance from arena center (0-1)
+ *   9: cooldown active (0 or 1)
+ *  10: own velocity X (-1 to 1)
+ *  11: own velocity Z (-1 to 1)
+ *  12: has target in range (0 or 1)
+ *  13: moving toward/away from enemy (dot product)
+ *  14: own score (normalized, /1000)
+ *  15: own kills (normalized, /20)
+ *  16: own deaths (normalized, /20)
+ *  17: match time remaining (0-1)
  */
 
 const { clamp, getArrayLength } = require("../utils/math");
 
-const INPUT_COUNT = 14;
+const INPUT_COUNT = 18;
 const ARENA_SIZE = 60;
 const MAX_HEALTH = 100;
 const MAX_SPEED = 7;
 
 class StateExtractor {
   constructor() {
-    this.inputVector = new Float64Array(INPUT_COUNT);
+    this.inputVector = new Float32Array(INPUT_COUNT);
     this.lastMoveX = 0;
     this.lastMoveZ = 0;
+    this.matchTimeRemaining = 1.0;
   }
 
   static get INPUT_COUNT() {
     return INPUT_COUNT;
   }
 
-  /**
-   * Update last known velocity for input vector
-   */
   setLastMove(x, z) {
     this.lastMoveX = x;
     this.lastMoveZ = z;
+  }
+
+  setMatchTime(remaining, total) {
+    this.matchTimeRemaining = total > 0 ? clamp(remaining / total, 0, 1) : 1;
   }
 
   /**
@@ -50,9 +56,10 @@ class StateExtractor {
    * @param {string} myId - This bot's userID
    * @param {number} weaponRange - Weapon target distance
    * @param {boolean} cooldownActive - Whether weapon is on cooldown
-   * @returns {Float64Array} 14-element normalized input vector
+   * @param {Object} playerData - room.state.players data (score, kills, deaths)
+   * @returns {Float32Array} 18-element normalized input vector
    */
-  extract(gameState, myId, weaponRange, cooldownActive) {
+  extract(gameState, myId, weaponRange, cooldownActive, playerData) {
     const v = this.inputVector;
     v.fill(0);
 
@@ -87,21 +94,18 @@ class StateExtractor {
     if (closestEnemy) {
       v[3] = clamp(closestEnemy.distance / ARENA_SIZE, 0, 1);
 
-      // Angle to enemy
       const dx = closestEnemy.position.x - myPos.x;
       const dz = closestEnemy.position.z - myPos.z;
       const angle = Math.atan2(dz, dx);
       v[4] = Math.sin(angle);
       v[5] = Math.cos(angle);
 
-      // Enemy health
       const enemyHealth = gameState.getHealth(closestEnemy.id);
       v[6] = enemyHealth / MAX_HEALTH;
 
-      // Has target
       v[12] = 1;
 
-      // Moving toward/away (dot product of velocity and direction to enemy)
+      // Dot product: moving toward/away
       const dirLen = Math.sqrt(dx * dx + dz * dz);
       if (dirLen > 0) {
         const ndx = dx / dirLen;
@@ -110,15 +114,23 @@ class StateExtractor {
         if (velLen > 0) {
           v[13] = clamp(
             (this.lastMoveX / velLen) * ndx + (this.lastMoveZ / velLen) * ndz,
-            -1,
-            1
+            -1, 1
           );
         }
       }
     } else {
-      v[3] = 1.0; // No enemy = max distance
-      v[12] = 0;
+      v[3] = 1.0;
     }
+
+    // Score, kills, deaths from player data
+    if (playerData) {
+      v[14] = clamp((playerData.score || 0) / 1000, 0, 1);
+      v[15] = clamp((playerData.kills || 0) / 20, 0, 1);
+      v[16] = clamp((playerData.deaths || 0) / 20, 0, 1);
+    }
+
+    // Match time remaining
+    v[17] = this.matchTimeRemaining;
 
     return v;
   }

@@ -1,0 +1,475 @@
+"""
+Chainer Agent — PPO Training Service
+
+Per-agent policy networks trained via Proximal Policy Optimization.
+Each agent has its own persistent neural network, experience buffer, and identity.
+
+Exposes HTTP API:
+  POST /experience       — receive experience batch from Node.js bot
+  GET  /model/:agent_id  — serve ONNX model for inference
+  GET  /stats            — training stats
+  POST /reset/:agent_id  — reset an agent's model
+
+Architecture:
+  - Each agent has its own ActorCritic network
+  - Training happens on GPU when experience buffer is full
+  - Models exported to ONNX after each training step
+  - Node.js bots load ONNX models via onnxruntime-node
+"""
+
+import os
+import json
+import time
+import threading
+from pathlib import Path
+from collections import defaultdict
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+
+# ── Config ──────────────────────────────────────────────────────────────
+
+STATE_DIM = 18        # Input features from game state
+ACTION_DIM = 6        # Movement(2), aim(2), shoot(1), ability(1)
+HIDDEN_DIM = 128      # Hidden layer size
+NUM_AGENTS = 15       # Max concurrent agents
+BATCH_SIZE = 256      # Min experiences before training
+LEARNING_RATE = 3e-4
+GAMMA = 0.99          # Discount factor
+GAE_LAMBDA = 0.95     # GAE lambda
+CLIP_EPSILON = 0.2    # PPO clip
+ENTROPY_COEF = 0.01   # Entropy bonus for exploration
+VALUE_COEF = 0.5      # Value loss coefficient
+PPO_EPOCHS = 4        # Training epochs per batch
+MODELS_DIR = Path("models")
+LOGS_DIR = Path("training_logs")
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# ── Neural Network ──────────────────────────────────────────────────────
+
+class ActorCritic(nn.Module):
+    """Per-agent policy + value network."""
+
+    def __init__(self, state_dim=STATE_DIM, action_dim=ACTION_DIM, hidden_dim=HIDDEN_DIM):
+        super().__init__()
+        self.shared = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        # Actor head: continuous actions (movement, aim) + binary actions (shoot, ability)
+        # Output: mean for each action dimension
+        self.actor_mean = nn.Linear(hidden_dim, action_dim)
+        # Learnable log_std for exploration
+        self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
+        # Critic head: state value
+        self.critic = nn.Linear(hidden_dim, 1)
+
+    def forward(self, state):
+        shared = self.shared(state)
+        action_mean = self.actor_mean(shared)
+        value = self.critic(shared)
+        return action_mean, self.actor_log_std, value
+
+    def get_action(self, state):
+        """Sample action from policy (for inference/ONNX export)."""
+        action_mean, log_std, value = self.forward(state)
+        return action_mean  # ONNX just exports the mean (deterministic)
+
+
+class ActorOnly(nn.Module):
+    """Inference-only wrapper for ONNX export (actor head only)."""
+
+    def __init__(self, actor_critic: ActorCritic):
+        super().__init__()
+        self.shared = actor_critic.shared
+        self.actor_mean = actor_critic.actor_mean
+
+    def forward(self, state):
+        shared = self.shared(state)
+        return torch.tanh(self.actor_mean(shared))  # Bound to [-1, 1]
+
+
+# ── Agent ───────────────────────────────────────────────────────────────
+
+class Agent:
+    """Individual agent with own policy, experience buffer, and identity."""
+
+    def __init__(self, agent_id: str):
+        self.agent_id = agent_id
+        self.model = ActorCritic().to(DEVICE)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE)
+
+        # Experience buffer
+        self.states = []
+        self.actions = []
+        self.rewards = []
+        self.values = []
+        self.log_probs = []
+        self.dones = []
+
+        # Stats
+        self.total_episodes = 0
+        self.total_steps = 0
+        self.total_score = 0
+        self.best_score = 0
+        self.train_steps = 0
+        self.last_train_time = 0
+        self.score_history = []  # Last 50 episode scores
+        self.kd_history = []    # Last 50 K/D ratios
+
+        # Model version (incremented on each training step)
+        self.model_version = 0
+
+    def add_experience(self, state, action, reward, value, log_prob, done):
+        self.states.append(state)
+        self.actions.append(action)
+        self.rewards.append(reward)
+        self.values.append(value)
+        self.log_probs.append(log_prob)
+        self.dones.append(done)
+        self.total_steps += 1
+
+    def has_enough_experience(self):
+        return len(self.states) >= BATCH_SIZE
+
+    def record_episode(self, score, kills, deaths):
+        self.total_episodes += 1
+        self.total_score += score
+        self.best_score = max(self.best_score, score)
+        self.score_history.append(score)
+        if len(self.score_history) > 50:
+            self.score_history.pop(0)
+        kd = kills / max(deaths, 1)
+        self.kd_history.append(kd)
+        if len(self.kd_history) > 50:
+            self.kd_history.pop(0)
+
+    def get_stats(self):
+        avg_score = np.mean(self.score_history) if self.score_history else 0
+        avg_kd = np.mean(self.kd_history) if self.kd_history else 0
+        return {
+            "agent_id": self.agent_id,
+            "episodes": self.total_episodes,
+            "total_steps": self.total_steps,
+            "train_steps": self.train_steps,
+            "model_version": self.model_version,
+            "best_score": round(self.best_score, 1),
+            "avg_score_50": round(avg_score, 1),
+            "avg_kd_50": round(avg_kd, 2),
+            "buffer_size": len(self.states),
+        }
+
+
+# ── PPO Trainer ─────────────────────────────────────────────────────────
+
+class PPOTrainer:
+    """Trains individual agent policy networks using PPO."""
+
+    def __init__(self):
+        self.agents: dict[str, Agent] = {}
+        self.lock = threading.Lock()
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"[Trainer] Device: {DEVICE}")
+        if DEVICE.type == "cuda":
+            print(f"[Trainer] GPU: {torch.cuda.get_device_name(0)}")
+
+    def get_or_create_agent(self, agent_id: str) -> Agent:
+        with self.lock:
+            if agent_id not in self.agents:
+                self.agents[agent_id] = Agent(agent_id)
+                print(f"[Trainer] Created agent: {agent_id}")
+                self._export_onnx(agent_id)
+            return self.agents[agent_id]
+
+    def process_experience(self, agent_id: str, transitions: list):
+        """
+        Process a batch of experience from a Node.js bot.
+        Each transition: { state, action, reward, done, score, kills, deaths }
+        """
+        agent = self.get_or_create_agent(agent_id)
+
+        for t in transitions:
+            state = torch.FloatTensor(t["state"]).to(DEVICE)
+            action = torch.FloatTensor(t["action"]).to(DEVICE)
+
+            # Compute value and log_prob from current policy
+            with torch.no_grad():
+                action_mean, log_std, value = agent.model(state.unsqueeze(0))
+                std = log_std.exp()
+                dist = torch.distributions.Normal(action_mean, std)
+                log_prob = dist.log_prob(action.unsqueeze(0)).sum(-1)
+
+            agent.add_experience(
+                state.cpu().numpy(),
+                action.cpu().numpy(),
+                t["reward"],
+                value.item(),
+                log_prob.item(),
+                t["done"],
+            )
+
+            # Record episode end
+            if t["done"]:
+                agent.record_episode(
+                    t.get("score", 0),
+                    t.get("kills", 0),
+                    t.get("deaths", 0),
+                )
+
+        # Train if buffer is full
+        if agent.has_enough_experience():
+            self._train(agent_id)
+
+    def _train(self, agent_id: str):
+        """PPO training step for a single agent."""
+        agent = self.agents[agent_id]
+        t0 = time.time()
+
+        # Convert to tensors
+        states = torch.FloatTensor(np.array(agent.states)).to(DEVICE)
+        actions = torch.FloatTensor(np.array(agent.actions)).to(DEVICE)
+        rewards = agent.rewards
+        values = agent.values
+        old_log_probs = torch.FloatTensor(agent.log_probs).to(DEVICE)
+        dones = agent.dones
+
+        # Compute GAE advantages
+        advantages = []
+        gae = 0
+        for t in reversed(range(len(rewards))):
+            if t == len(rewards) - 1:
+                next_value = 0
+            else:
+                next_value = values[t + 1]
+            delta = rewards[t] + GAMMA * next_value * (1 - dones[t]) - values[t]
+            gae = delta + GAMMA * GAE_LAMBDA * (1 - dones[t]) * gae
+            advantages.insert(0, gae)
+
+        advantages = torch.FloatTensor(advantages).to(DEVICE)
+        returns = advantages + torch.FloatTensor(values).to(DEVICE)
+
+        # Normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # PPO update
+        for epoch in range(PPO_EPOCHS):
+            # Mini-batch sampling
+            indices = torch.randperm(len(states))
+            for start in range(0, len(states), 64):
+                end = min(start + 64, len(states))
+                idx = indices[start:end]
+
+                batch_states = states[idx]
+                batch_actions = actions[idx]
+                batch_old_log_probs = old_log_probs[idx]
+                batch_advantages = advantages[idx]
+                batch_returns = returns[idx]
+
+                # Forward pass
+                action_mean, log_std, value = agent.model(batch_states)
+                std = log_std.exp()
+                dist = torch.distributions.Normal(action_mean, std)
+                new_log_probs = dist.log_prob(batch_actions).sum(-1)
+                entropy = dist.entropy().sum(-1).mean()
+
+                # PPO clipped objective
+                ratio = (new_log_probs - batch_old_log_probs).exp()
+                surr1 = ratio * batch_advantages
+                surr2 = torch.clamp(ratio, 1 - CLIP_EPSILON, 1 + CLIP_EPSILON) * batch_advantages
+                actor_loss = -torch.min(surr1, surr2).mean()
+
+                # Value loss
+                value_loss = VALUE_COEF * (batch_returns - value.squeeze()).pow(2).mean()
+
+                # Total loss
+                loss = actor_loss + value_loss - ENTROPY_COEF * entropy
+
+                agent.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(agent.model.parameters(), 0.5)
+                agent.optimizer.step()
+
+        # Clear buffer
+        agent.states.clear()
+        agent.actions.clear()
+        agent.rewards.clear()
+        agent.values.clear()
+        agent.log_probs.clear()
+        agent.dones.clear()
+
+        agent.train_steps += 1
+        agent.model_version += 1
+        agent.last_train_time = time.time() - t0
+
+        # Export updated model to ONNX
+        self._export_onnx(agent_id)
+
+        # Save checkpoint
+        self._save_checkpoint(agent_id)
+
+        # Log
+        stats = agent.get_stats()
+        print(
+            f"[Train] {agent_id}: "
+            f"v{agent.model_version} "
+            f"score={stats['avg_score_50']} "
+            f"kd={stats['avg_kd_50']} "
+            f"ep={agent.total_episodes} "
+            f"({agent.last_train_time:.1f}s)"
+        )
+
+        # Append to training log
+        log_entry = {**stats, "timestamp": time.time()}
+        with open(LOGS_DIR / f"{agent_id}.jsonl", "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+
+    def _export_onnx(self, agent_id: str):
+        """Export agent's actor network to ONNX for Node.js inference."""
+        agent = self.agents[agent_id]
+        actor = ActorOnly(agent.model).to(DEVICE)
+        actor.eval()
+
+        dummy = torch.randn(1, STATE_DIM).to(DEVICE)
+        onnx_path = MODELS_DIR / f"{agent_id}.onnx"
+
+        torch.onnx.export(
+            actor,
+            dummy,
+            str(onnx_path),
+            input_names=["state"],
+            output_names=["action"],
+            dynamic_axes={"state": {0: "batch"}, "action": {0: "batch"}},
+            opset_version=14,
+        )
+        actor.train()
+
+    def _save_checkpoint(self, agent_id: str):
+        """Save model weights for persistence."""
+        agent = self.agents[agent_id]
+        ckpt_dir = MODELS_DIR / "checkpoints"
+        ckpt_dir.mkdir(exist_ok=True)
+        torch.save(
+            {
+                "model_state": agent.model.state_dict(),
+                "optimizer_state": agent.optimizer.state_dict(),
+                "agent_id": agent_id,
+                "model_version": agent.model_version,
+                "total_episodes": agent.total_episodes,
+                "total_steps": agent.total_steps,
+                "best_score": agent.best_score,
+                "score_history": agent.score_history,
+                "kd_history": agent.kd_history,
+            },
+            ckpt_dir / f"{agent_id}.pt",
+        )
+
+    def load_checkpoint(self, agent_id: str):
+        """Load saved model weights."""
+        ckpt_path = MODELS_DIR / "checkpoints" / f"{agent_id}.pt"
+        if not ckpt_path.exists():
+            return False
+        agent = self.get_or_create_agent(agent_id)
+        ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
+        agent.model.load_state_dict(ckpt["model_state"])
+        agent.optimizer.load_state_dict(ckpt["optimizer_state"])
+        agent.model_version = ckpt["model_version"]
+        agent.total_episodes = ckpt["total_episodes"]
+        agent.total_steps = ckpt["total_steps"]
+        agent.best_score = ckpt["best_score"]
+        agent.score_history = ckpt.get("score_history", [])
+        agent.kd_history = ckpt.get("kd_history", [])
+        self._export_onnx(agent_id)
+        print(f"[Trainer] Loaded checkpoint for {agent_id} (v{agent.model_version})")
+        return True
+
+    def get_all_stats(self):
+        stats = []
+        for agent_id, agent in self.agents.items():
+            stats.append(agent.get_stats())
+        stats.sort(key=lambda s: s["avg_score_50"], reverse=True)
+        return stats
+
+
+# ── HTTP API ────────────────────────────────────────────────────────────
+
+def create_app(trainer: PPOTrainer):
+    from flask import Flask, request, jsonify, send_file
+
+    app = Flask(__name__)
+
+    @app.route("/experience", methods=["POST"])
+    def receive_experience():
+        data = request.get_json()
+        agent_id = data["agent_id"]
+        transitions = data["transitions"]
+        trainer.process_experience(agent_id, transitions)
+        agent = trainer.agents.get(agent_id)
+        return jsonify({
+            "ok": True,
+            "model_version": agent.model_version if agent else 0,
+        })
+
+    @app.route("/model/<agent_id>", methods=["GET"])
+    def get_model(agent_id):
+        model_path = MODELS_DIR / f"{agent_id}.onnx"
+        if not model_path.exists():
+            trainer.get_or_create_agent(agent_id)
+            model_path = MODELS_DIR / f"{agent_id}.onnx"
+        return send_file(str(model_path.resolve()), mimetype="application/octet-stream")
+
+    @app.route("/model/<agent_id>/version", methods=["GET"])
+    def get_model_version(agent_id):
+        agent = trainer.agents.get(agent_id)
+        return jsonify({"version": agent.model_version if agent else 0})
+
+    @app.route("/stats", methods=["GET"])
+    def get_stats():
+        return jsonify({
+            "device": str(DEVICE),
+            "num_agents": len(trainer.agents),
+            "agents": trainer.get_all_stats(),
+        })
+
+    @app.route("/episode", methods=["POST"])
+    def record_episode():
+        """Record end-of-match stats for an agent."""
+        data = request.get_json()
+        agent_id = data["agent_id"]
+        agent = trainer.get_or_create_agent(agent_id)
+        agent.record_episode(
+            data.get("score", 0),
+            data.get("kills", 0),
+            data.get("deaths", 0),
+        )
+        return jsonify({"ok": True})
+
+    @app.route("/health", methods=["GET"])
+    def health():
+        return jsonify({"status": "ok", "device": str(DEVICE)})
+
+    return app
+
+
+# ── Main ────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    trainer = PPOTrainer()
+
+    # Load any saved checkpoints
+    ckpt_dir = MODELS_DIR / "checkpoints"
+    if ckpt_dir.exists():
+        for f in ckpt_dir.glob("*.pt"):
+            agent_id = f.stem
+            trainer.load_checkpoint(agent_id)
+
+    app = create_app(trainer)
+    port = int(os.environ.get("TRAINER_PORT", 5555))
+    print(f"[Trainer] Starting on port {port}")
+    app.run(host="0.0.0.0", port=port, threaded=True)

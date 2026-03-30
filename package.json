@@ -19,6 +19,7 @@
     "dotenv": "^17.3.1",
     "long": "^5.2.3",
     "neataptic": "^1.4.7",
+    "onnxruntime-node": "^1.24.3",
     "protobufjs": "^7.3.2"
   }
 }
