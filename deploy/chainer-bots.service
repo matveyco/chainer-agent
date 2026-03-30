@@ -1,0 +1,19 @@
+[Unit]
+Description=Chainer Agent - Bot Swarm (Node.js)
+After=network.target chainer-trainer.service
+Requires=chainer-trainer.service
+
+[Service]
+Type=simple
+User=m
+WorkingDirectory=/home/m/chainer-agent
+EnvironmentFile=/home/m/chainer-agent/.env
+Environment=NO_DASHBOARD=1
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/m/chainer-agent/bots.log
+StandardError=append:/home/m/chainer-agent/bots.log
+
+[Install]
+WantedBy=multi-user.target

@@ -42,6 +42,9 @@ if (process.env.MAP_NAME) config.server.mapName = process.env.MAP_NAME;
 if (process.env.WEAPON_TYPE) config.server.weaponType = process.env.WEAPON_TYPE;
 if (process.env.POPULATION_SIZE) config.evolution.populationSize = parseInt(process.env.POPULATION_SIZE);
 if (process.env.MATCH_TIMEOUT) config.bot.matchTimeout = parseInt(process.env.MATCH_TIMEOUT);
+if (process.env.NUM_ROOMS) config.numRooms = parseInt(process.env.NUM_ROOMS);
+if (process.env.SELECTION_INTERVAL) config.selectionInterval = parseInt(process.env.SELECTION_INTERVAL);
+if (process.env.NUM_CULL) config.numCull = parseInt(process.env.NUM_CULL);
 
 // Parse CLI args (highest priority)
 const args = process.argv.slice(2);

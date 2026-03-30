@@ -396,6 +396,89 @@ class PPOTrainer:
         stats.sort(key=lambda s: s["avg_score_50"], reverse=True)
         return stats
 
+    def natural_selection(self, num_cull=5):
+        """
+        Genetic selection: kill the weakest, clone the strongest with mutations.
+        - Rank all agents by avg_score_50
+        - Bottom `num_cull` agents get replaced
+        - Top `num_cull` agents get cloned with weight mutations
+        - Clones inherit the parent's learned weights + small noise
+        """
+        with self.lock:
+            if len(self.agents) < num_cull * 2:
+                print(f"[Selection] Not enough agents ({len(self.agents)}) for selection")
+                return
+
+            # Rank by composite: score + K/D bonus
+            ranked = sorted(
+                self.agents.values(),
+                key=lambda a: (
+                    np.mean(a.score_history) if a.score_history else 0
+                ) + (
+                    np.mean(a.kd_history) * 100 if a.kd_history else 0
+                ),
+                reverse=True,
+            )
+
+            strong = ranked[:num_cull]
+            weak = ranked[-num_cull:]
+
+            print(f"\n{'='*60}")
+            print(f"[Selection] NATURAL SELECTION — culling {num_cull} weakest")
+            print(f"  STRONG (cloning):")
+            for a in strong:
+                s = np.mean(a.score_history) if a.score_history else 0
+                k = np.mean(a.kd_history) if a.kd_history else 0
+                print(f"    {a.agent_id}: score={s:.0f} kd={k:.2f} ep={a.total_episodes}")
+            print(f"  WEAK (replacing):")
+            for a in weak:
+                s = np.mean(a.score_history) if a.score_history else 0
+                k = np.mean(a.kd_history) if a.kd_history else 0
+                print(f"    {a.agent_id}: score={s:.0f} kd={k:.2f} ep={a.total_episodes}")
+
+            # Clone strong → replace weak
+            for i, weak_agent in enumerate(weak):
+                parent = strong[i % len(strong)]
+                child_id = weak_agent.agent_id
+
+                # Create new agent with parent's weights + mutation
+                new_agent = Agent(child_id)
+                new_agent.model.load_state_dict(parent.model.state_dict())
+
+                # Mutate weights: add Gaussian noise
+                with torch.no_grad():
+                    for param in new_agent.model.parameters():
+                        noise = torch.randn_like(param) * 0.02  # 2% noise
+                        param.add_(noise)
+
+                # Fresh optimizer for the mutant
+                new_agent.optimizer = optim.Adam(new_agent.model.parameters(), lr=LEARNING_RATE)
+
+                # Inherit some stats for context
+                new_agent.total_episodes = 0  # Fresh start
+                new_agent.total_steps = 0
+                new_agent.best_score = 0
+                new_agent.score_history = []
+                new_agent.kd_history = []
+                new_agent.model_version = parent.model_version
+
+                self.agents[child_id] = new_agent
+                self._export_onnx(child_id)
+                self._save_checkpoint(child_id)
+
+                print(f"  {child_id} ← cloned from {parent.agent_id} (mutated)")
+
+            print(f"{'='*60}\n")
+
+            # Log selection event
+            with open(LOGS_DIR / "selection.jsonl", "a") as f:
+                f.write(json.dumps({
+                    "timestamp": time.time(),
+                    "strong": [a.agent_id for a in strong],
+                    "weak": [a.agent_id for a in weak],
+                    "stats": self.get_all_stats(),
+                }) + "\n")
+
 
 # ── HTTP API ────────────────────────────────────────────────────────────
 
@@ -449,6 +532,14 @@ def create_app(trainer: PPOTrainer):
             data.get("deaths", 0),
         )
         return jsonify({"ok": True})
+
+    @app.route("/select", methods=["POST"])
+    def run_selection():
+        """Trigger natural selection: cull weakest, clone strongest."""
+        data = request.get_json() or {}
+        num_cull = data.get("num_cull", 5)
+        trainer.natural_selection(num_cull)
+        return jsonify({"ok": True, "agents": trainer.get_all_stats()})
 
     @app.route("/health", methods=["GET"])
     def health():
