@@ -1,0 +1,34 @@
+{
+  "server": {
+    "roomName": "TimeLimited",
+    "mapName": "arena",
+    "weaponType": "rocket"
+  },
+  "evolution": {
+    "populationSize": 15,
+    "elitism": 2,
+    "mutationRate": 0.3,
+    "mutationAmount": 0.1,
+    "maxStagnation": 15
+  },
+  "fitness": {
+    "killWeight": 100,
+    "deathPenalty": -50,
+    "damageDealtWeight": 1,
+    "accuracyWeight": 50,
+    "survivalTimeWeight": 0.5
+  },
+  "bot": {
+    "matchTimeout": 120000,
+    "respawnDelay": 3,
+    "clientStaggerMs": 100,
+    "arenaSize": 60,
+    "arenaSafeSize": 55
+  },
+  "persistence": {
+    "savePopulationEvery": 10,
+    "generationsDir": "data/generations",
+    "bestDir": "data/best",
+    "logsDir": "data/logs"
+  }
+}

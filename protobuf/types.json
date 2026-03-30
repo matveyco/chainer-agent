@@ -1,0 +1,87 @@
+{
+    "nested": {
+        "Input": {
+            "fields": {
+                "inputMove": { "type": "float", "id": 1, "rule": "repeated" },
+                "target": { "type": "float", "id": 2, "rule": "repeated" },
+                "animation": { "type": "int32", "id": 3 },
+                "speed": { "type": "uint32", "id": 4 }
+            }
+        },
+        "InputMessage": {
+            "fields": {
+                "userID": { "type": "string", "id": 1 },
+                "inputs": { "type": "Input", "id": 2, "rule": "repeated" }
+            }
+        },
+        "ShootMessage": {
+            "fields": {
+                "origin": { "type": "float", "id": 1, "rule": "repeated" },
+                "target": { "type": "float", "id": 2, "rule": "repeated" },
+                "weaponType": { "type": "string", "id": 3 },
+                "time": { "type": "uint64", "id": 4 },
+                "shotID": { "type": "string", "id": 5 }
+            }
+        },
+        "Projectile": {
+            "fields": {
+                "userID": { "type": "string", "id": 1 },
+                "projectileID": { "type": "string", "id": 2 },
+                "projectileType": { "type": "string", "id": 3 },
+                "playerPosition": { "type": "float", "id": 4, "rule": "repeated" },
+                "speed": { "type": "uint32", "id": 5 },
+                "radius": { "type": "float", "id": 6 },
+                "origin": { "type": "float", "id": 7, "rule": "repeated" },
+                "target": { "type": "float", "id": 8, "rule": "repeated" },
+                "parabola": { "type": "float", "id": 9 },
+                "blowRadius": { "type": "float", "id": 10 },
+                "latency": { "type": "float", "id": 11 },
+                "elapsedTime": { "type": "float", "id": 12 },
+                "maxDistance": { "type": "float", "id": 13 }
+            }
+        },
+        "PhysicsPlayer": {
+            "fields": {
+                "userID": { "type": "string", "id": 1 },
+                "position": { "type": "float", "id": 2, "rule": "repeated" }
+            }
+        },
+        "PhysicsBattleCrystal": {
+            "fields": {
+                "battleCrystalID": { "type": "string", "id": 1 },
+                "position": { "type": "float", "id": 2, "rule": "repeated" }
+            }
+        },
+
+        "PhysicsAcidBarrel": {
+            "fields": {
+                "acidBarrelID": { "type": "string", "id": 1 },
+                "position": { "type": "float", "id": 2, "rule": "repeated" },
+                "rotation": { "type": "float", "id": 3, "rule": "repeated" }
+            }
+        },
+        "PhysicsDynamicCollider": {
+            "fields": {
+                "dynamicColliderID": { "type": "string", "id": 1 },
+                "position": { "type": "float", "id": 2, "rule": "repeated" },
+                "rotation": { "type": "float", "id": 3, "rule": "repeated" },
+                "scale": { "type": "float", "id": 4, "rule": "repeated" }
+            }
+        },
+        "PhysicsState": {
+            "fields": {
+                "players": { "type": "PhysicsPlayer", "id": 1, "rule": "repeated" },
+                "battleCrystals": { "type": "PhysicsBattleCrystal", "id": 2, "rule": "repeated" },
+                "dynamicColliders": { "type": "PhysicsDynamicCollider", "id": 3, "rule": "repeated" },
+                "acidBarrels": { "type": "PhysicsAcidBarrel", "id": 4, "rule": "repeated" },
+                "mobs": { "type": "PhysicsMob", "id": 5, "rule": "repeated" }
+            }
+        },
+        "PhysicsMob": {
+            "fields": {
+                "mobID": { "type": "string", "id": 1 },
+                "position": { "type": "float", "id": 2, "rule": "repeated" }
+            }
+        }
+    }
+}
