@@ -45,6 +45,7 @@ if (process.env.MATCH_TIMEOUT) config.bot.matchTimeout = parseInt(process.env.MA
 if (process.env.NUM_ROOMS) config.numRooms = parseInt(process.env.NUM_ROOMS);
 if (process.env.SELECTION_INTERVAL) config.selectionInterval = parseInt(process.env.SELECTION_INTERVAL);
 if (process.env.NUM_CULL) config.numCull = parseInt(process.env.NUM_CULL);
+config.server.authKey = process.env.OAUTH_API_KEY || null;
 config.ollamaApiKey = process.env.OLLAMA_CLOUD_API_KEY || null;
 config.ollamaModel = process.env.DEEP_ANALYSIS_MODEL || "kimi-k2.5:cloud";
 

@@ -193,10 +193,15 @@ class Trainer {
 
           try {
             const client = new Client(clientUrl);
-            const room = await client.joinById(roomData.roomId, {
+            const joinOptions = {
               userID: userIDs[i],
               weaponType: this.config.server.weaponType,
-            });
+            };
+            // Add auth key if configured
+            if (this.config.server.authKey) {
+              joinOptions.OAuthAPIKey = this.config.server.authKey;
+            }
+            const room = await client.joinById(roomData.roomId, joinOptions);
 
             bot.room = room;
             bot.gameState = gameState;
