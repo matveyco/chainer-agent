@@ -1,6 +1,7 @@
 [Unit]
-Description=Chainer Agent - PPO Training Service (PyTorch GPU)
-After=network.target
+Description=Chainer Agent - Shared Policy Trainer
+After=network.target chainer-doctor.service
+Requires=chainer-doctor.service
 
 [Service]
 Type=simple
@@ -8,7 +9,8 @@ User=m
 WorkingDirectory=/home/m/chainer-agent
 EnvironmentFile=/home/m/chainer-agent/.env
 Environment=TRAINER_PORT=5555
-ExecStart=/home/m/chainer-agent/venv/bin/python3 training/trainer.py
+ExecStartPre=/usr/bin/node scripts/doctor.js --service trainer
+ExecStart=/home/m/chainer-agent/venv/bin/gunicorn --workers 1 --threads 8 --bind 0.0.0.0:5555 training.wsgi:app
 Restart=always
 RestartSec=5
 StandardOutput=append:/home/m/chainer-agent/trainer.log

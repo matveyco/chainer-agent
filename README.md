@@ -4,11 +4,11 @@ Reliable self-improving bots for the chainer.io arena.
 
 This repo now runs a supervised PPO bot swarm with:
 
-- per-agent ONNX policies served by a Python trainer
-- match-boundary LLM strategy coaching
+- shared-backbone PPO training with per-agent ONNX exports
+- match-boundary LLM strategy coaching in shadow mode
 - rostered model alias loading (`latest`, `candidate`, `champion`)
 - single-instance runtime locking
-- live operator telemetry for rooms, trainer health, joins, inputs, and failures
+- live operator telemetry for rooms, trainer health, joins, inputs, failures, evaluation, and promotion
 
 ## What Changed
 
@@ -16,7 +16,8 @@ The old NEAT-oriented control loop has been replaced by a production-oriented ru
 
 - `SwarmSupervisor` owns lifecycle, health checks, room scheduling, and telemetry
 - `RoomCoordinator` owns queueing, seat assignment tracking, joins, retries, and cleanup
-- `training/trainer.py` now exports models through a single-threaded ONNX queue into a filesystem model registry
+- `training/trainer.py` now trains a shared policy family and exports agent-bound ONNX artifacts through a single-threaded ONNX queue
+- `EvaluationManager` runs fixed-template ladder matches and persists promotion reports
 - the dashboard is now an operator console, not just a trainer stat page
 
 ## Architecture
@@ -25,6 +26,7 @@ The old NEAT-oriented control loop has been replaced by a production-oriented ru
 ┌────────────────────────────┐
 │  Web Operator Console      │  port 3000
 │  /api/system /api/rooms    │
+│  /api/eval /api/promotion  │
 └──────────────┬─────────────┘
                │
 ┌──────────────▼─────────────┐
@@ -32,6 +34,7 @@ The old NEAT-oriented control loop has been replaced by a production-oriented ru
 │  single-instance lock      │
 │  room telemetry + events   │
 │  one RoomCoordinator/room  │
+│  evaluation ladder runner  │
 └──────────────┬─────────────┘
                │
 ┌──────────────▼─────────────┐
@@ -41,18 +44,18 @@ The old NEAT-oriented control loop has been replaced by a production-oriented ru
                │
 ┌──────────────▼─────────────┐
 │  PPO Trainer               │  port 5555
-│  per-agent registry        │
-│  aliases: latest/candidate │
-│  champion scaffolding      │
+│  shared policy families    │
+│  per-agent ONNX exports    │
+│  manual champion approval  │
 └────────────────────────────┘
 ```
 
 ## Runtime Model
 
-Each bot has two layers:
+Each bot still plays with two layers:
 
-- Reflex layer: PPO policy exported to ONNX and executed locally with `onnxruntime-node`
-- Strategy layer: LLM runs every 3 matches, returns strict JSON, and updates bounded strategy parameters
+- Reflex layer: shared PPO actor-critic trained from pooled self-play experience and exported as agent-bound ONNX policies
+- Strategy layer: LLM runs only between matches, returns strict JSON, and updates bounded strategy parameters
 
 The LLM is not in the hot path. Live action decisions stay deterministic and low-latency.
 
@@ -67,24 +70,39 @@ The LLM is not in the hot path. Live action decisions stay deterministic and low
 
 ## Model Registry
 
-Models are stored under:
+Models are stored under a shared family registry plus agent bindings:
 
 ```text
-models/<agent_id>/versions/v000123/
+models/policies/<family>/versions/v000123/
+  family_checkpoint.pt
+  family_metadata.json
+models/agents/<agent_id>/binding.json
+models/agents/<agent_id>/versions/v000123/
   policy.onnx
   checkpoint.pt
   metadata.json
   eval.json
-models/<agent_id>/aliases.json
+models/agents/<agent_id>/aliases.json
 ```
 
 Alias support:
 
 - `latest`: newest exported policy
-- `candidate`: newest policy considered for promotion
-- `champion`: stable slot for curated/tournament play
+- `candidate`: newest policy that passed sanity or ladder gates
+- `champion`: stable slot for curated/tournament play, updated only by explicit approval
 
 Bots can be rostered against aliases instead of raw versions.
+
+## Evaluation And Promotion
+
+Promotion is intentionally separate from training:
+
+- training writes fresh `latest` snapshots
+- evaluation runs fixed roster templates against `candidate` / `champion` pools
+- `candidate` promotion can happen automatically or by operator action
+- `champion` promotion is manual-only and audited through promotion history
+
+Because the external arena backend is out of scope, evaluation is statistically reproducible rather than backend-seeded deterministic.
 
 ## State + Reward
 
@@ -181,7 +199,10 @@ SELECTION_INTERVAL=10
 NUM_CULL=5
 
 BOT_ROSTER_PATH=config/roster.json
-NODE_TLS_REJECT_UNAUTHORIZED=0
+DEFAULT_POLICY_FAMILY=arena-main
+EVALUATION_SAMPLE_MATCHES=3
+EVALUATION_PROMOTION_MARGIN=0.05
+EVALUATION_MIN_WIN_RATE=0.55
 ```
 
 LLM coaching:
@@ -244,6 +265,7 @@ bash deploy/setup.sh
 
 Services:
 
+- `chainer-doctor`
 - `chainer-trainer`
 - `chainer-bots`
 - `chainer-dashboard`
@@ -258,6 +280,26 @@ Services:
 - `GET /readyz`
 - `GET /metrics`
 - `GET /system`
+- `GET /rooms`
+- `GET /events`
+- `GET /matches`
+- `GET /eval/status`
+- `GET /eval/history`
+- `POST /eval/run`
+
+### Trainer
+
+- `GET /families`
+- `GET /family/:family_id/status`
+- `GET /family/:family_id/bindings`
+- `POST /promotion/candidate/:family_id`
+- `POST /promotion/champion/:family_id/approve`
+- `POST /promotion/champion/:family_id/reject`
+
+### Doctor
+
+- `npm run doctor`
+- `node scripts/doctor.js --live --json`
 - `GET /rooms`
 - `GET /events`
 

@@ -2,11 +2,12 @@
  * Chainer Agent — Operator Dashboard Server
  */
 
-require("dotenv").config({ path: require("path").join(__dirname, "../.env") });
+require("dotenv").config({ path: require("path").join(__dirname, "../.env"), quiet: true });
 
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const { spawn } = require("child_process");
 
 const app = express();
 app.use(express.json());
@@ -38,6 +39,39 @@ async function fetchText(baseUrl, endpoint) {
     throw new Error(`${baseUrl}${endpoint} -> ${res.status}`);
   }
   return res.text();
+}
+
+async function runDoctor({ live = false } = {}) {
+  return new Promise((resolve, reject) => {
+    const args = [path.join(__dirname, "../scripts/doctor.js"), "--service", "dashboard", "--json"];
+    if (live) args.push("--live");
+
+    const child = spawn(process.execPath, args, {
+      cwd: path.join(__dirname, ".."),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      try {
+        const payload = stdout.trim() ? JSON.parse(stdout) : { ok: code === 0 };
+        payload.exitCode = code;
+        if (stderr.trim()) payload.stderr = stderr.trim();
+        resolve(payload);
+      } catch (err) {
+        reject(new Error(stderr.trim() || err.message));
+      }
+    });
+  });
 }
 
 function readRuntimeSnapshot() {
@@ -168,6 +202,112 @@ app.get("/api/events", async (req, res) => {
     res.json(events);
   } catch (err) {
     res.status(503).json({ error: err.message });
+  }
+});
+
+app.get("/api/matches", async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || "50", 10)));
+    const matches = await supervisorOrSnapshot(`/matches?limit=${limit}`, (snapshot) => snapshot.matches || []);
+    res.json(matches);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
+app.get("/api/eval/status", async (req, res) => {
+  try {
+    const evaluation = await supervisorOrSnapshot("/eval/status", (snapshot) => snapshot.evaluation || { current: null, queue: [] });
+    res.json(evaluation);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
+app.get("/api/eval/history", async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(200, parseInt(req.query.limit || "25", 10)));
+    const history = await supervisorOrSnapshot(`/eval/history?limit=${limit}`, (snapshot) => snapshot.evaluation?.history || []);
+    res.json(history);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
+app.post("/api/eval/run", async (req, res) => {
+  try {
+    const data = await fetchJSON(SUPERVISOR_URL, "/eval/run", {
+      method: "POST",
+      body: JSON.stringify(req.body || {}),
+    });
+    res.status(202).json(data);
+  } catch (err) {
+    res.status(err.status || 503).json({ error: err.message, payload: err.payload });
+  }
+});
+
+app.get("/api/families", async (req, res) => {
+  try {
+    const data = await fetchJSON(TRAINER_URL, "/families");
+    res.json(data);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
+app.get("/api/eval/report-history", async (req, res) => {
+  try {
+    const query = new URLSearchParams(req.query).toString();
+    const suffix = query ? `?${query}` : "";
+    const data = await fetchJSON(TRAINER_URL, `/eval/history${suffix}`);
+    res.json(data);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
+app.post("/api/promotion/candidate/:family", async (req, res) => {
+  try {
+    const data = await fetchJSON(TRAINER_URL, `/promotion/candidate/${req.params.family}`, {
+      method: "POST",
+      body: JSON.stringify(req.body || {}),
+    });
+    res.json(data);
+  } catch (err) {
+    res.status(err.status || 503).json({ error: err.message, payload: err.payload });
+  }
+});
+
+app.post("/api/promotion/champion/:family/approve", async (req, res) => {
+  try {
+    const data = await fetchJSON(TRAINER_URL, `/promotion/champion/${req.params.family}/approve`, {
+      method: "POST",
+      body: JSON.stringify(req.body || {}),
+    });
+    res.json(data);
+  } catch (err) {
+    res.status(err.status || 503).json({ error: err.message, payload: err.payload });
+  }
+});
+
+app.post("/api/promotion/champion/:family/reject", async (req, res) => {
+  try {
+    const data = await fetchJSON(TRAINER_URL, `/promotion/champion/${req.params.family}/reject`, {
+      method: "POST",
+      body: JSON.stringify(req.body || {}),
+    });
+    res.json(data);
+  } catch (err) {
+    res.status(err.status || 503).json({ error: err.message, payload: err.payload });
+  }
+});
+
+app.get("/api/diagnostics", async (req, res) => {
+  try {
+    const report = await runDoctor({ live: req.query.live === "1" });
+    res.status(report.ok ? 200 : 503).json(report);
+  } catch (err) {
+    res.status(503).json({ ok: false, error: err.message });
   }
 });
 

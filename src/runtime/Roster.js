@@ -1,11 +1,16 @@
 const fs = require("fs");
 const path = require("path");
+const { DEFAULT_ARCHETYPE_ID, getArchetypeByIndex } = require("../bot/archetypes");
 
 function normalizeAgent(agent, index, defaultAlias) {
+  const archetype = getArchetypeByIndex(index);
   return {
     agentId: agent.agentId || agent.id || `agent_${index}`,
     displayName: agent.displayName || agent.userName || agent.agentId || `agent_${index}`,
     modelAlias: agent.modelAlias || agent.alias || defaultAlias,
+    policyFamily: agent.policyFamily || agent.family || "arena-main",
+    archetypeId: agent.archetypeId || archetype.id || DEFAULT_ARCHETYPE_ID,
+    modelVersion: Number.isFinite(agent.modelVersion) ? agent.modelVersion : null,
   };
 }
 

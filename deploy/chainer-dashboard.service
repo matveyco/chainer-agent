@@ -1,13 +1,14 @@
 [Unit]
 Description=Chainer Agent - Operator Dashboard
-After=network.target chainer-trainer.service chainer-bots.service
-Requires=chainer-trainer.service chainer-bots.service
+After=network.target chainer-doctor.service chainer-trainer.service chainer-bots.service
+Requires=chainer-doctor.service chainer-trainer.service chainer-bots.service
 
 [Service]
 Type=simple
 User=m
 WorkingDirectory=/home/m/chainer-agent
 EnvironmentFile=/home/m/chainer-agent/.env
+ExecStartPre=/usr/bin/node scripts/doctor.js --service dashboard
 ExecStart=/usr/bin/node web/server.js
 Restart=always
 RestartSec=5

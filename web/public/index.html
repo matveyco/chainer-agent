@@ -312,7 +312,8 @@
         <div class="panel-header">
           <h2>System Snapshot</h2>
           <div class="controls">
-            <button class="btn success" onclick="triggerSelection()">Natural Selection</button>
+            <button class="btn success" onclick="queueEvaluation()">Queue Evaluation</button>
+            <button class="btn" onclick="runDiagnostics(false)">Doctor</button>
             <button class="btn" onclick="refreshAll()">Refresh</button>
           </div>
         </div>
@@ -348,6 +349,71 @@
         </thead>
         <tbody id="rooms-table"></tbody>
       </table>
+    </section>
+
+    <section class="two-col">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Evaluation Ladder</h2>
+          <div class="controls">
+            <button class="btn success" onclick="queueEvaluation()">Run Eval</button>
+            <button class="btn" onclick="runDiagnostics(true)">Live Doctor</button>
+          </div>
+        </div>
+        <div class="metric-list" id="evaluation-summary" style="margin-bottom:14px;"></div>
+        <table>
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>Status</th>
+              <th>Family</th>
+              <th>Candidate</th>
+              <th>Champion</th>
+              <th>Win Rate</th>
+              <th>Margin</th>
+              <th>When</th>
+            </tr>
+          </thead>
+          <tbody id="evaluation-history-table"></tbody>
+        </table>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Policy Families</h2>
+          <div class="tiny" id="families-meta">-</div>
+        </div>
+        <div id="families-list" class="events"></div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin:16px 0;">
+      <div class="panel-header">
+        <h2>Recent Matches</h2>
+        <div class="tiny" id="matches-meta">-</div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Room</th>
+            <th>Mode</th>
+            <th>Template</th>
+            <th>Winner</th>
+            <th>Score</th>
+            <th>Fill</th>
+            <th>Duration</th>
+            <th>Finished</th>
+          </tr>
+        </thead>
+        <tbody id="matches-table"></tbody>
+      </table>
+    </section>
+
+    <section class="panel" style="margin-bottom:16px;">
+      <div class="panel-header">
+        <h2>Diagnostics</h2>
+        <div class="tiny" id="diagnostics-meta">-</div>
+      </div>
+      <div id="diagnostics-panel" class="events"><div class="muted">Doctor has not been run yet.</div></div>
     </section>
 
     <section class="panel">
@@ -392,34 +458,68 @@
     let runtimeState = null;
     let runtimeRooms = [];
     let runtimeEvents = [];
+    let familyStats = [];
+    let evaluationStatus = { current: null, queue: [] };
+    let evaluationHistory = [];
+    let matchSummaries = [];
+    let diagnostics = null;
     let profiles = {};
     let sortField = 'avg_score_50';
     let sortDir = -1;
 
     async function fetchJSON(url) {
       const res = await fetch(url);
-      return res.json();
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      return data;
+    }
+
+    async function postJSON(url, body = {}) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      return data;
     }
 
     async function refreshAll() {
       try {
-        const [system, rooms, events, stats, profileMap] = await Promise.all([
+        const [system, rooms, events, stats, profileMap, families, evalStatus, evalHistory, matches] = await Promise.all([
           fetchJSON('/api/system'),
           fetchJSON('/api/rooms'),
           fetchJSON('/api/events?limit=25'),
           fetchJSON('/api/stats'),
-          fetchJSON('/api/profiles')
+          fetchJSON('/api/profiles'),
+          fetchJSON('/api/families'),
+          fetchJSON('/api/eval/status'),
+          fetchJSON('/api/eval/history?limit=12'),
+          fetchJSON('/api/matches?limit=12')
         ]);
 
         runtimeState = system.runtime;
         runtimeRooms = Array.isArray(rooms) ? rooms : [];
         runtimeEvents = Array.isArray(events) ? events : [];
         agentStats = stats.agents || [];
+        familyStats = Array.isArray(families) ? families : [];
+        evaluationStatus = evalStatus || { current: null, queue: [] };
+        evaluationHistory = Array.isArray(evalHistory) ? evalHistory : [];
+        matchSummaries = Array.isArray(matches) ? matches : [];
         profiles = profileMap || {};
 
         renderSystem(system, stats);
         renderRooms();
         renderEvents();
+        renderEvaluation();
+        renderFamilies();
+        renderMatches();
+        renderDiagnostics();
         renderAgents();
       } catch (err) {
         setToast('Refresh failed: ' + err.message);
@@ -451,7 +551,7 @@
 
       document.getElementById('card-supervisor').textContent = runtime.status || 'unknown';
       document.getElementById('card-supervisor-meta').textContent =
-        `${runnerCount} runner(s) · ${runtime.supervisor?.totalMatches || 0} matches`;
+        `${runnerCount} runner(s) · ${runtime.supervisor?.totalMatches || 0} matches · ${runtime.supervisor?.currentMode || 'training'}`;
 
       document.getElementById('card-trainer').textContent = trainerReady ? 'ready' : 'not ready';
       document.getElementById('card-trainer-meta').textContent =
@@ -475,7 +575,8 @@
         ['Trainer Reachable', runtime.trainer?.reachable ? 'yes' : 'no'],
         ['Trainer Ready', trainerReady ? 'yes' : 'no'],
         ['Trainer Latency', `${runtime.trainer?.latencyMs ?? '-'} ms`],
-        ['Selection Runs', runtime.supervisor?.selectionRuns || 0],
+        ['Current Mode', runtime.supervisor?.currentMode || 'training'],
+        ['Evaluation Runs', runtime.counters?.evaluationRuns || 0],
         ['Inputs Sent', runtime.counters?.inputsSent || 0],
         ['State Updates', runtime.counters?.stateUpdates || 0],
         ['Model Fetch Failures', runtime.counters?.modelFetchFailures || 0],
@@ -531,6 +632,104 @@
       }).join('') || '<div class="muted">No recent events.</div>';
     }
 
+    function renderEvaluation() {
+      const current = evaluationStatus.current;
+      const queued = evaluationStatus.queue || [];
+      const latest = evaluationHistory[0]?.report || null;
+      const summary = [
+        ['Current Job', current ? current.id : 'idle'],
+        ['Queued Jobs', queued.length],
+        ['Latest Pass', latest ? (latest.passed ? 'yes' : 'no') : 'n/a'],
+        ['Latest Win Rate', latest ? `${Math.round((latest.win_rate || 0) * 100)}%` : 'n/a'],
+        ['Latest Margin', latest ? `${Math.round((latest.score_margin || 0) * 100)}%` : 'n/a'],
+        ['Evaluation Failures', runtimeState?.counters?.evaluationFailures || 0],
+      ];
+      document.getElementById('evaluation-summary').innerHTML = summary.map(([label, value]) =>
+        `<div>${label}<br><strong>${value}</strong></div>`
+      ).join('');
+
+      document.getElementById('evaluation-history-table').innerHTML = evaluationHistory.map((entry) => {
+        const report = entry.report || {};
+        const statusClass = entry.status === 'completed'
+          ? (report.passed ? 'good' : 'warn')
+          : entry.status === 'failed'
+            ? 'danger'
+            : 'warn';
+        return `<tr>
+          <td>${entry.id || report.job_id || '-'}</td>
+          <td class="${statusClass}">${entry.status || 'unknown'}</td>
+          <td>${entry.familyId || report.family_id || '-'}</td>
+          <td>v${entry.candidateVersion || report.candidate_version || '-'}</td>
+          <td>v${entry.championVersion || report.champion_version || '-'}</td>
+          <td>${report.win_rate !== undefined ? `${Math.round(report.win_rate * 100)}%` : '-'}</td>
+          <td>${report.score_margin !== undefined ? `${Math.round(report.score_margin * 100)}%` : '-'}</td>
+          <td>${entry.finishedAt || report.recorded_at || entry.requestedAt || '-'}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="8" class="muted">No evaluation runs yet.</td></tr>';
+    }
+
+    function renderFamilies() {
+      document.getElementById('families-meta').textContent = `${familyStats.length} policy families`;
+      document.getElementById('families-list').innerHTML = familyStats.map((family) => `
+        <div class="event">
+          <div class="head">
+            <span class="good">${family.family_id}</span>
+            <span class="muted">v${family.model_version || 0}</span>
+          </div>
+          <div class="msg">
+            candidate v${family.aliases?.candidate ?? '-'} · champion v${family.aliases?.champion ?? '-'} ·
+            ${family.agent_count || 0} agents · ${family.train_steps || 0} train steps
+          </div>
+          <div class="controls" style="margin-top:10px;">
+            <button class="btn" onclick="promoteCandidate('${family.family_id}')">Promote Candidate</button>
+            <button class="btn success" onclick="approveChampion('${family.family_id}')">Approve Champion</button>
+            <button class="btn danger" onclick="rejectChampion('${family.family_id}')">Reject Champion</button>
+          </div>
+        </div>
+      `).join('') || '<div class="muted">No family stats yet.</div>';
+    }
+
+    function renderMatches() {
+      document.getElementById('matches-meta').textContent = `${matchSummaries.length} recent summaries`;
+      document.getElementById('matches-table').innerHTML = matchSummaries.map((match) => `
+        <tr>
+          <td>#${match.roomIndex ?? '-'}</td>
+          <td>${match.mode || '-'}</td>
+          <td>${match.templateId || '-'}</td>
+          <td>${match.winner?.agentId || match.winner?.id || '-'}</td>
+          <td>${match.winner?.score ?? '-'}</td>
+          <td>${Math.round((match.fillRatio || 0) * 100)}%</td>
+          <td>${Math.round((match.durationMs || 0) / 1000)}s</td>
+          <td>${match.finishedAt || '-'}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="8" class="muted">No completed matches yet.</td></tr>';
+    }
+
+    function renderDiagnostics() {
+      const meta = document.getElementById('diagnostics-meta');
+      const panel = document.getElementById('diagnostics-panel');
+      if (!diagnostics) {
+        meta.textContent = 'not run';
+        panel.innerHTML = '<div class="muted">Doctor has not been run yet.</div>';
+        return;
+      }
+      meta.textContent = diagnostics.ok ? 'healthy' : 'issues found';
+      const findings = [
+        ...(diagnostics.python?.ok ? [`<div class="event"><div class="head"><span class="good">python</span><span class="muted">${diagnostics.python.python || ''}</span></div><div class="msg">python environment available</div></div>`] : []),
+        ...(diagnostics.errors || []).map((item) => `<div class="event"><div class="head"><span class="danger">error</span></div><div class="msg">${item}</div></div>`),
+        ...(diagnostics.warnings || []).map((item) => `<div class="event"><div class="head"><span class="warn">warning</span></div><div class="msg">${item}</div></div>`),
+      ];
+      const liveChecks = diagnostics.live
+        ? Object.entries(diagnostics.live).map(([name, result]) => `
+            <div class="event">
+              <div class="head"><span class="${result.ok ? 'good' : 'danger'}">${name}</span><span class="muted">${result.status || result.error || ''}</span></div>
+              <div class="msg">${result.ok ? 'ok' : (result.error || 'failed')}</div>
+            </div>
+          `).join('')
+        : '';
+      panel.innerHTML = findings.join('') + liveChecks || '<div class="muted">Doctor reported no findings.</div>';
+    }
+
     function renderAgents() {
       document.getElementById('agents-meta').textContent =
         `${agentStats.length} tracked agents`;
@@ -578,14 +777,57 @@
       renderAgents();
     }
 
-    async function triggerSelection() {
-      if (!confirm('Run natural selection now?')) return;
+    async function queueEvaluation() {
+      if (!confirm('Queue an evaluation run now?')) return;
       try {
-        await fetch('/api/select', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-        setToast('Selection triggered');
+        await postJSON('/api/eval/run', {});
+        setToast('Evaluation queued');
         refreshAll();
       } catch (err) {
-        setToast('Selection failed: ' + err.message);
+        setToast('Evaluation failed: ' + err.message);
+      }
+    }
+
+    async function runDiagnostics(live) {
+      try {
+        const res = await fetch(`/api/diagnostics${live ? '?live=1' : ''}`);
+        diagnostics = await res.json();
+        renderDiagnostics();
+        setToast(`Doctor ${diagnostics.ok ? 'passed' : 'found issues'}`);
+      } catch (err) {
+        setToast('Doctor failed: ' + err.message);
+      }
+    }
+
+    async function promoteCandidate(familyId) {
+      try {
+        await postJSON(`/api/promotion/candidate/${familyId}`, {});
+        setToast(`Candidate promoted for ${familyId}`);
+        refreshAll();
+      } catch (err) {
+        setToast('Candidate promotion failed: ' + err.message);
+      }
+    }
+
+    async function approveChampion(familyId) {
+      if (!confirm(`Approve current candidate as champion for ${familyId}?`)) return;
+      try {
+        await postJSON(`/api/promotion/champion/${familyId}/approve`, {});
+        setToast(`Champion approved for ${familyId}`);
+        refreshAll();
+      } catch (err) {
+        setToast('Champion approval failed: ' + err.message);
+      }
+    }
+
+    async function rejectChampion(familyId) {
+      if (!confirm(`Reject current candidate for ${familyId}?`)) return;
+      try {
+        await postJSON(`/api/promotion/champion/${familyId}/reject`, {});
+        setToast(`Candidate rejected for ${familyId}`);
+        refreshAll();
+      } catch (err) {
+        setToast('Champion rejection failed: ' + err.message);
       }
     }
 

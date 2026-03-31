@@ -26,12 +26,15 @@ function cleanPublicAddress(value) {
 }
 
 class RoomCoordinator {
-  constructor({ roomIndex, roster, config, runtimeState, strategicBrains }) {
+  constructor({ roomIndex, roster, config, runtimeState, strategicBrains, mode = "training", jobId = null, templateId = null }) {
     this.roomIndex = roomIndex;
     this.roster = roster;
     this.config = config;
     this.runtimeState = runtimeState;
     this.strategicBrains = strategicBrains;
+    this.mode = mode;
+    this.jobId = jobId;
+    this.templateId = templateId;
     this.roomState = this.runtimeState.ensureRoom(roomIndex);
     this.requiredAgents = Math.max(
       1,
@@ -49,9 +52,15 @@ class RoomCoordinator {
       targetAgents: this.roster.length,
       assignedAgents: 0,
       connectedAgents: 0,
+      livePlayers: 0,
+      stateUpdates: 0,
+      inputsSent: 0,
       roomId: null,
       publicAddress: null,
       lastError: null,
+      mode: this.mode,
+      jobId: this.jobId,
+      templateId: this.templateId,
     });
 
     try {
@@ -64,6 +73,9 @@ class RoomCoordinator {
           phase: "assignment_failed",
           assignedAgents: selection?.sessions.length || 0,
           lastError: selection ? "not enough assigned seats" : "assignment timeout",
+          mode: this.mode,
+          jobId: this.jobId,
+          templateId: this.templateId,
         });
         return { connectedCount: 0, roomId: null };
       }
@@ -78,23 +90,20 @@ class RoomCoordinator {
           phase: "connect_failed",
           connectedAgents: connectedSessions.length,
           lastError: `too few bots (${connectedSessions.length})`,
+          mode: this.mode,
+          jobId: this.jobId,
+          templateId: this.templateId,
         });
         await this._cleanupSessions(sessions);
         return { connectedCount: connectedSessions.length, roomId: selection.roomId };
       }
 
       await this._runMatchLoop(selection, connectedSessions);
-      await this._finalizeMatch(connectedSessions);
+      const agentResults = await this._finalizeMatch(connectedSessions);
+      const summary = this._buildMatchSummary(selection, connectedSessions, agentResults);
+      this.runtimeState.recordMatchSummary(summary);
 
-      const top = connectedSessions
-        .filter((session) => session.bot.data)
-        .map((session) => ({
-          id: session.bot.agentId,
-          score: session.bot.data?.score || 0,
-          kills: session.bot.data?.kills || 0,
-          deaths: session.bot.data?.deaths || 0,
-        }))
-        .sort((a, b) => b.score - a.score)[0];
+      const top = summary.agentResults[0];
 
       if (top) {
         logger.info(
@@ -103,14 +112,19 @@ class RoomCoordinator {
       }
 
       this.runtimeState.updateRoom(this.roomIndex, {
-        status: "idle",
-        phase: "idle",
+        status: "completed",
+        phase: "completed",
         lastMatchEndedAt: new Date().toISOString(),
+        connectedAgents: connectedSessions.length,
+        mode: this.mode,
+        jobId: this.jobId,
+        templateId: this.templateId,
       });
 
       return {
         connectedCount: connectedSessions.length,
         roomId: selection.roomId,
+        summary,
       };
     } catch (err) {
       this.runtimeState.noteRoomError(this.roomIndex, err);
@@ -131,6 +145,9 @@ class RoomCoordinator {
       const bot = new SmartBot(userID, null, this.config, agent.agentId, {
         displayName: agent.displayName,
         modelAlias: agent.modelAlias,
+        modelVersion: agent.modelVersion,
+        policyFamily: agent.policyFamily,
+        archetypeId: agent.archetypeId,
         reporter: this.runtimeState,
       });
 
@@ -241,6 +258,9 @@ class RoomCoordinator {
       queueWaitMs: Math.round(queueWaitMs),
       roomId: bestSelection.roomId,
       publicAddress: bestSelection.publicAddress,
+      mode: this.mode,
+      jobId: this.jobId,
+      templateId: this.templateId,
     });
 
     return bestSelection;
@@ -280,6 +300,9 @@ class RoomCoordinator {
       roomId: selection.roomId,
       publicAddress: host,
       lastMatchStartedAt: new Date().toISOString(),
+      mode: this.mode,
+      jobId: this.jobId,
+      templateId: this.templateId,
     });
 
     const connectedSessions = [];
@@ -317,6 +340,7 @@ class RoomCoordinator {
 
         await session.bot.initBrain(this.config.trainerUrl);
         session.bot.data = session.room.state?.players?.get?.(session.userID);
+        session.agent.loadedModelVersion = session.bot.brain?.modelVersion || 0;
         connectedSessions.push(session);
         this.runtimeState.incrementCounter("joinSuccesses");
         return true;
@@ -334,6 +358,9 @@ class RoomCoordinator {
       phase: connected >= this.requiredAgents ? "running" : "connect_failed",
       connectedAgents: connected,
       fillRatio: +(connected / this.roster.length).toFixed(3),
+      mode: this.mode,
+      jobId: this.jobId,
+      templateId: this.templateId,
     });
 
     await this._sleep(1000);
@@ -525,10 +552,14 @@ class RoomCoordinator {
       phase: "finalizing",
       status: "finalizing",
       roomId: selection.roomId,
+      mode: this.mode,
+      jobId: this.jobId,
+      templateId: this.templateId,
     });
   }
 
   async _finalizeMatch(connectedSessions) {
+    const agentResults = [];
     for (const session of connectedSessions) {
       const summary = {
         score: session.bot.data?.score || 0,
@@ -558,9 +589,13 @@ class RoomCoordinator {
         this.strategicBrains.set(session.bot.agentId, session.bot.strategicBrain);
         await session.bot.strategicBrain.analyzeMatch(summary).catch(() => {});
       }
+
+      agentResults.push(this._buildAgentResult(session, summary));
     }
 
     this._persistProfiles();
+    agentResults.sort((left, right) => right.score - left.score);
+    return agentResults;
   }
 
   async _cleanupSessions(sessions) {
@@ -610,6 +645,50 @@ class RoomCoordinator {
       require("fs").mkdirSync(require("path").dirname(resolved), { recursive: true });
       require("fs").writeFileSync(resolved, JSON.stringify(profiles, null, 2));
     } catch {}
+  }
+
+  _buildAgentResult(session, summary) {
+    const runtime = session.bot.getRuntimeStats();
+    return {
+      id: session.bot.agentId,
+      agentId: session.bot.agentId,
+      displayName: session.agent.displayName,
+      policyFamily: session.agent.policyFamily || session.bot.policyFamily,
+      archetypeId: session.agent.archetypeId || session.bot.archetypeId,
+      modelAlias: session.agent.modelAlias || session.bot.modelAlias,
+      modelVersion: runtime.modelVersion || session.agent.loadedModelVersion || session.agent.modelVersion || 0,
+      evaluationSide: session.agent.evaluationSide || null,
+      score: summary.score,
+      kills: summary.kills,
+      deaths: summary.deaths,
+      damageDealt: summary.damageDealt,
+      damageTaken: summary.damageTaken,
+      survivalTime: summary.survivalTime,
+      abilitiesUsed: summary.abilitiesUsed,
+      inputsSent: runtime.inputsSent,
+      stateUpdates: runtime.stateUpdates,
+    };
+  }
+
+  _buildMatchSummary(selection, connectedSessions, agentResults) {
+    const startedAt = this.roomState.lastMatchStartedAt || new Date().toISOString();
+    const finishedAt = new Date().toISOString();
+    return {
+      roomIndex: this.roomIndex,
+      mode: this.mode,
+      jobId: this.jobId,
+      templateId: this.templateId,
+      roomId: selection.roomId,
+      publicAddress: cleanPublicAddress(selection.publicAddress),
+      assignedAgents: selection.sessions.length,
+      connectedAgents: connectedSessions.length,
+      fillRatio: +(connectedSessions.length / Math.max(this.roster.length, 1)).toFixed(3),
+      startedAt,
+      finishedAt,
+      durationMs: Math.max(0, new Date(finishedAt).getTime() - new Date(startedAt).getTime()),
+      winner: agentResults[0] || null,
+      agentResults,
+    };
   }
 
   _sleep(ms) {

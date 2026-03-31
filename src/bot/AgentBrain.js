@@ -20,8 +20,12 @@ class AgentBrain {
     this.agentId = agentId;
     this.trainerUrl = trainerUrl;
     this.modelAlias = options.modelAlias || "latest";
+    this.modelVersionHint = options.modelVersion ?? null;
+    this.policyFamily = options.policyFamily || "arena-main";
+    this.archetypeId = options.archetypeId || "tactician";
     this.rewardConfig = options.rewardConfig || {};
     this.reporter = options.reporter || null;
+    this.strategyProvider = options.strategyProvider || null;
     this.session = null;
     this.ort = null;
     this.modelVersion = 0;
@@ -146,6 +150,10 @@ class AgentBrain {
         body: JSON.stringify({
           agent_id: this.agentId,
           model_alias: this.modelAlias,
+          model_version: this.modelVersionHint,
+          policy_family: this.policyFamily,
+          archetype_id: this.archetypeId,
+          strategy_vector: this._getStrategyVector(),
           transitions: this.experienceBuffer,
         }),
       });
@@ -177,6 +185,10 @@ class AgentBrain {
         body: JSON.stringify({
           agent_id: this.agentId,
           model_alias: this.modelAlias,
+          model_version: this.modelVersionHint,
+          policy_family: this.policyFamily,
+          archetype_id: this.archetypeId,
+          strategy_vector: this._getStrategyVector(),
           reward_totals: this.episodeRewardTotals,
           ...payload,
         }),
@@ -189,7 +201,11 @@ class AgentBrain {
       await fetch(`${this.trainerUrl}/agent/${this.agentId}/strategy`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(strategyPayload),
+        body: JSON.stringify({
+          ...strategyPayload,
+          policy_family: this.policyFamily,
+          archetype_id: this.archetypeId,
+        }),
       });
     } catch {}
   }
@@ -211,6 +227,11 @@ class AgentBrain {
       try {
         const url = new URL(`${this.trainerUrl}/model/${this.agentId}`);
         url.searchParams.set("alias", this.modelAlias);
+        url.searchParams.set("policy_family", this.policyFamily);
+        url.searchParams.set("archetype_id", this.archetypeId);
+        if (this.modelVersionHint !== null && this.modelVersionHint !== undefined) {
+          url.searchParams.set("version", String(this.modelVersionHint));
+        }
 
         const startedAt = Date.now();
         const res = await fetch(url);
@@ -223,6 +244,11 @@ class AgentBrain {
 
         const metadataUrl = new URL(`${this.trainerUrl}/model/${this.agentId}/metadata`);
         metadataUrl.searchParams.set("alias", this.modelAlias);
+        metadataUrl.searchParams.set("policy_family", this.policyFamily);
+        metadataUrl.searchParams.set("archetype_id", this.archetypeId);
+        if (this.modelVersionHint !== null && this.modelVersionHint !== undefined) {
+          metadataUrl.searchParams.set("version", String(this.modelVersionHint));
+        }
         const metadataRes = await fetch(metadataUrl).catch(() => null);
         if (metadataRes?.ok) {
           this.metadata = await metadataRes.json();
@@ -230,6 +256,11 @@ class AgentBrain {
         } else {
           const versionUrl = new URL(`${this.trainerUrl}/model/${this.agentId}/version`);
           versionUrl.searchParams.set("alias", this.modelAlias);
+          versionUrl.searchParams.set("policy_family", this.policyFamily);
+          versionUrl.searchParams.set("archetype_id", this.archetypeId);
+          if (this.modelVersionHint !== null && this.modelVersionHint !== undefined) {
+            versionUrl.searchParams.set("version", String(this.modelVersionHint));
+          }
           const versionRes = await fetch(versionUrl);
           const versionData = await versionRes.json();
           this.modelVersion = versionData.version || 0;
@@ -290,6 +321,17 @@ class AgentBrain {
     this.nextLoadAttemptAt = Date.now() + 10000;
     this.reporter?.incrementCounter("modelFetchFailures");
     logger.warn(`Agent ${this.agentId}: model load failed: ${err.message}`);
+  }
+
+  _getStrategyVector() {
+    const raw = typeof this.strategyProvider === "function" ? this.strategyProvider() : null;
+    return {
+      aggression: raw?.aggression ?? 0,
+      accuracy_focus: raw?.accuracy_focus ?? 0,
+      crystal_priority: raw?.crystal_priority ?? 0,
+      ability_usage: raw?.ability_usage ?? 0,
+      retreat_threshold: raw?.retreat_threshold ?? 0,
+    };
   }
 }
 

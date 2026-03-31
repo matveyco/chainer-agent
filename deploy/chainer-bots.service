@@ -1,13 +1,14 @@
 [Unit]
 Description=Chainer Agent - Bot Swarm (Node.js)
-After=network.target chainer-trainer.service
-Requires=chainer-trainer.service
+After=network.target chainer-doctor.service chainer-trainer.service
+Requires=chainer-doctor.service chainer-trainer.service
 
 [Service]
 Type=simple
 User=m
 WorkingDirectory=/home/m/chainer-agent
 EnvironmentFile=/home/m/chainer-agent/.env
+ExecStartPre=/usr/bin/node scripts/doctor.js --service bots
 ExecStart=/usr/bin/node src/index.js
 Restart=always
 RestartSec=10

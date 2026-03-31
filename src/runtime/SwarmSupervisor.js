@@ -4,6 +4,7 @@ const express = require("express");
 const { spawnSync } = require("child_process");
 const { RoomCoordinator } = require("./RoomCoordinator");
 const { RuntimeState } = require("./RuntimeState");
+const { EvaluationManager } = require("./EvaluationManager");
 const { SingleInstanceLock } = require("./SingleInstanceLock");
 const { loadRoster } = require("./Roster");
 const { StrategicBrain } = require("../bot/StrategicBrain");
@@ -28,6 +29,12 @@ class SwarmSupervisor {
     this.telemetryServer = null;
     this.strategicBrains = new Map();
     this.roster = loadRoster(config);
+    this.evaluationManager = new EvaluationManager({
+      config,
+      runtimeState: this.runtimeState,
+      roster: this.roster,
+      trainerUrl: config.trainerUrl,
+    });
     this.totalMatches = 0;
     this.selectionInterval = config.training?.selectionInterval || 10;
     this.numCull = config.training?.numCull || 5;
@@ -49,6 +56,7 @@ class SwarmSupervisor {
 
     this.running = true;
     this.runtimeState.setStatus("running");
+    this._refreshEvaluationSnapshot();
 
     while (this.running) {
       this.runtimeState.setActiveRunnerCount(this._countActiveRunners());
@@ -64,38 +72,29 @@ class SwarmSupervisor {
         continue;
       }
 
-      const roomPromises = [];
-      for (let roomIndex = 0; roomIndex < this.roster.length; roomIndex++) {
-        const coordinator = new RoomCoordinator({
-          roomIndex,
-          roster: this.roster[roomIndex],
-          config: this.config,
-          runtimeState: this.runtimeState,
-          strategicBrains: this.strategicBrains,
+      await this._maybeQueueAutomaticEvaluation();
+
+      let results = null;
+      if (this.evaluationManager.currentJob || this.evaluationManager.queue.length > 0) {
+        this.runtimeState.setMode("evaluation");
+        results = await this.evaluationManager.runNext({
+          runRoomBatch: (rosters, options) => this._runRoomBatch(rosters, options),
+          fetchFamilyStatus: (familyId) => this._fetchFamilyStatus(familyId),
+          submitReport: (report) => this._submitEvaluationReport(report),
         });
-
-        roomPromises.push(
-          coordinator.runMatch().catch((err) => ({
-            connectedCount: 0,
-            error: err.message,
-          }))
-        );
-
-        if (roomIndex < this.roster.length - 1) {
-          await this._sleep(this.config.rooms?.staggerMs || 5000);
-        }
+      } else {
+        this.runtimeState.setMode("training");
+        results = await this._runRoomBatch(this.roster, { mode: "training" });
       }
+      this._refreshEvaluationSnapshot();
 
-      const results = await Promise.all(roomPromises);
-      for (const result of results) {
-        if (result.connectedCount > 0) {
-          this.totalMatches += 1;
-          this.runtimeState.markMatchComplete();
+      if (Array.isArray(results)) {
+        for (const result of results) {
+          if (result.connectedCount > 0) {
+            this.totalMatches += 1;
+            this.runtimeState.markMatchComplete();
+          }
         }
-      }
-
-      if (this.totalMatches > 0 && this.totalMatches % this.selectionInterval === 0) {
-        await this._triggerSelection();
       }
 
       await this._sleep(this.config.rooms?.requeueBackoffMs || 3000);
@@ -122,6 +121,8 @@ class SwarmSupervisor {
     fs.writeFileSync(file, JSON.stringify({
       system: this.runtimeState.getSystemSnapshot(),
       rooms: this.runtimeState.getRoomsSnapshot(),
+      matches: this.runtimeState.getMatchSummariesSnapshot(),
+      evaluation: this.runtimeState.getEvaluationSnapshot(),
       profiles: this.getAllProfiles(),
     }, null, 2));
     return file;
@@ -167,6 +168,7 @@ class SwarmSupervisor {
       this.strategicBrains.set(
         agent.agentId,
         new StrategicBrain(agent.agentId, this.config.ollamaApiKey, this.config.ollamaModel, {
+          archetypeId: agent.archetypeId,
           trainerUrl: this.config.trainerUrl,
           reporter: this.runtimeState,
         })
@@ -195,6 +197,7 @@ class SwarmSupervisor {
 
   _startTelemetryServer() {
     const app = express();
+    app.use(express.json());
 
     app.get("/healthz", (req, res) => {
       res.json({
@@ -227,6 +230,30 @@ class SwarmSupervisor {
     app.get("/events", (req, res) => {
       const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || "100", 10)));
       res.json(this.runtimeState.getEventsSnapshot(limit));
+    });
+
+    app.get("/matches", (req, res) => {
+      const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || "50", 10)));
+      res.json(this.runtimeState.getMatchSummariesSnapshot(limit));
+    });
+
+    app.get("/eval/status", (req, res) => {
+      res.json(this.evaluationManager.getStatus());
+    });
+
+    app.get("/eval/history", (req, res) => {
+      const limit = Math.max(1, Math.min(200, parseInt(req.query.limit || "25", 10)));
+      res.json(this.evaluationManager.getHistory(limit));
+    });
+
+    app.post("/eval/run", async (req, res) => {
+      try {
+        const job = this.evaluationManager.queueRun(req.body || {});
+        this._refreshEvaluationSnapshot();
+        res.status(202).json(job);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
     });
 
     const port = this.config.runtime?.port || 3101;
@@ -282,13 +309,97 @@ class SwarmSupervisor {
 
   _countActiveRunners() {
     try {
-      const result = spawnSync("pgrep", ["-fc", "node src/index.js"], { encoding: "utf-8" });
+      const result = spawnSync("ps", ["-Ao", "pid=,comm=,args="], { encoding: "utf-8" });
       if (result.status === 0) {
-        const count = parseInt(result.stdout.trim(), 10);
-        if (Number.isFinite(count)) return count;
+        return result.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .filter((line) => /\bnode\b/.test(line) && line.includes("src/index.js"))
+          .length || 1;
       }
     } catch {}
     return 1;
+  }
+
+  async _runRoomBatch(roomRosters, options = {}) {
+    const roomPromises = [];
+    for (let roomIndex = 0; roomIndex < roomRosters.length; roomIndex++) {
+      const coordinator = new RoomCoordinator({
+        roomIndex,
+        roster: roomRosters[roomIndex],
+        config: this.config,
+        runtimeState: this.runtimeState,
+        strategicBrains: this.strategicBrains,
+        mode: options.mode || "training",
+        jobId: options.jobId || null,
+        templateId: options.templateId || null,
+      });
+
+      roomPromises.push(
+        coordinator.runMatch().catch((err) => ({
+          connectedCount: 0,
+          error: err.message,
+          summary: null,
+        }))
+      );
+
+      if (roomIndex < roomRosters.length - 1) {
+        await this._sleep(this.config.rooms?.staggerMs || 5000);
+      }
+    }
+
+    return Promise.all(roomPromises);
+  }
+
+  async _fetchFamilyStatus(familyId) {
+    const response = await fetchJSON(`${this.config.trainerUrl}/family/${familyId}/status`);
+    if (!response.ok) {
+      throw new Error(response.data?.error || `family status HTTP ${response.status}`);
+    }
+    return response.data;
+  }
+
+  async _submitEvaluationReport(report) {
+    if (!report) return null;
+    const response = await fetchJSON(`${this.config.trainerUrl}/eval/report`, {
+      method: "POST",
+      body: JSON.stringify(report),
+    });
+    if (!response.ok) {
+      throw new Error(response.data?.error || `eval report HTTP ${response.status}`);
+    }
+    return response.data;
+  }
+
+  async _maybeQueueAutomaticEvaluation() {
+    if (this.totalMatches <= 0 || this.totalMatches % this.selectionInterval !== 0) {
+      return null;
+    }
+    try {
+      const job = await this.evaluationManager.maybeQueueAutomatic((familyId) =>
+        this._fetchFamilyStatus(familyId)
+      );
+      if (job) {
+        this.runtimeState.recordEvent("info", "automatic evaluation queued", {
+          familyId: job.familyId,
+          candidateVersion: job.candidateVersion,
+        });
+      }
+      return job;
+    } catch (err) {
+      this.runtimeState.recordEvent("warn", "automatic evaluation queue failed", {
+        error: err.message,
+      });
+      return null;
+    }
+  }
+
+  _refreshEvaluationSnapshot() {
+    this.runtimeState.setEvaluationSnapshot({
+      ...this.evaluationManager.getStatus(),
+      history: this.evaluationManager.getHistory(),
+    });
   }
 
   _sleep(ms) {

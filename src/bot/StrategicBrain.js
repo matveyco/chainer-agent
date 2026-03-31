@@ -6,52 +6,10 @@
  */
 
 const logger = require("../utils/logger");
+const { getDefaultArchetype } = require("./archetypes");
 
 const OLLAMA_API = "https://api.ollama.com/api/chat";
 const DEFAULT_MODEL = "kimi-k2.5:cloud";
-
-const ARCHETYPES = [
-  {
-    name: "Hunter",
-    traits: "Aggressive predator. Charges enemies, stays close, never retreats.",
-    defaults: { aggression: 0.9, accuracy_focus: 0.4, crystal_priority: 0.1, ability_usage: 0.7, retreat_threshold: 0.1 },
-  },
-  {
-    name: "Sniper",
-    traits: "Patient marksman. Keeps maximum distance, only shoots with clear aim.",
-    defaults: { aggression: 0.2, accuracy_focus: 0.95, crystal_priority: 0.2, ability_usage: 0.3, retreat_threshold: 0.4 },
-  },
-  {
-    name: "Collector",
-    traits: "Crystal hoarder. Avoids fights, prioritizes score through crystals and survival.",
-    defaults: { aggression: 0.1, accuracy_focus: 0.3, crystal_priority: 0.95, ability_usage: 0.2, retreat_threshold: 0.6 },
-  },
-  {
-    name: "Survivor",
-    traits: "Cockroach. Retreats early, heals, outlasts everyone.",
-    defaults: { aggression: 0.3, accuracy_focus: 0.5, crystal_priority: 0.4, ability_usage: 0.5, retreat_threshold: 0.7 },
-  },
-  {
-    name: "Berserker",
-    traits: "All-in maniac. Constant shooting, constant abilities, zero self-preservation.",
-    defaults: { aggression: 1.0, accuracy_focus: 0.2, crystal_priority: 0.0, ability_usage: 1.0, retreat_threshold: 0.0 },
-  },
-  {
-    name: "Tactician",
-    traits: "Balanced fighter. Adapts to situation and trades off score, risk, and objectives.",
-    defaults: { aggression: 0.5, accuracy_focus: 0.6, crystal_priority: 0.3, ability_usage: 0.5, retreat_threshold: 0.35 },
-  },
-  {
-    name: "Flanker",
-    traits: "Edge player. Circles the arena, attacks from behind, hit-and-run specialist.",
-    defaults: { aggression: 0.6, accuracy_focus: 0.7, crystal_priority: 0.2, ability_usage: 0.6, retreat_threshold: 0.3 },
-  },
-  {
-    name: "Guardian",
-    traits: "Area controller. Holds center, punishes intruders, values objective denial.",
-    defaults: { aggression: 0.7, accuracy_focus: 0.5, crystal_priority: 0.4, ability_usage: 0.8, retreat_threshold: 0.25 },
-  },
-];
 
 class StrategicBrain {
   constructor(agentId, apiKey, model = DEFAULT_MODEL, options = {}) {
@@ -62,9 +20,10 @@ class StrategicBrain {
     this.reporter = options.reporter || null;
 
     const idx = parseInt(agentId.replace(/\D/g, ""), 10) || 0;
-    const archetype = ARCHETYPES[idx % ARCHETYPES.length];
+    const archetype = getDefaultArchetype(options.archetypeId, idx);
 
     this.personality = {
+      archetype_id: archetype.id,
       archetype: archetype.name,
       traits: archetype.traits,
       seed: idx,
@@ -207,6 +166,16 @@ class StrategicBrain {
         total_score: this.totalScore,
         avg_kd: +(this.totalKills / Math.max(this.totalDeaths, 1)).toFixed(2),
       },
+    };
+  }
+
+  getStrategyVector() {
+    return {
+      aggression: this.strategy.aggression ?? 0,
+      accuracy_focus: this.strategy.accuracy_focus ?? 0,
+      crystal_priority: this.strategy.crystal_priority ?? 0,
+      ability_usage: this.strategy.ability_usage ?? 0,
+      retreat_threshold: this.strategy.retreat_threshold ?? 0,
     };
   }
 

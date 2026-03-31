@@ -17,7 +17,8 @@
   "training": {
     "selectionInterval": 10,
     "numCull": 5,
-    "defaultModelAlias": "latest"
+    "defaultModelAlias": "latest",
+    "defaultPolicyFamily": "arena-main"
   },
   "fitness": {
     "killWeight": 100,
@@ -59,12 +60,17 @@
     "logsDir": "data/logs",
     "runtimeStateFile": "data/runtime_state.json",
     "runtimeEventsFile": "data/runtime_events.jsonl",
+    "matchSummariesFile": "data/match_summaries.jsonl",
+    "evaluationStateFile": "data/evaluation_state.json",
+    "evaluationHistoryFile": "data/evaluation_history.jsonl",
     "rosterFile": "config/roster.json",
     "profilesFile": "data/agent_profiles.json"
   },
   "evaluation": {
     "minEpisodes": 10,
     "promotionMargin": 0.05,
-    "sampleMatches": 3
+    "sampleMatches": 3,
+    "minWinRate": 0.55,
+    "historyLimit": 50
   }
 }

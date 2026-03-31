@@ -18,6 +18,9 @@ class SmartBot {
     this.agentId = agentId || userID;
     this.displayName = options.displayName || this.agentId;
     this.modelAlias = options.modelAlias || config.training?.defaultModelAlias || "latest";
+    this.modelVersion = options.modelVersion ?? null;
+    this.policyFamily = options.policyFamily || "arena-main";
+    this.archetypeId = options.archetypeId || "tactician";
     this.reporter = options.reporter || null;
     this.config = config;
     this.mapName = config.server.mapName;
@@ -31,6 +34,7 @@ class SmartBot {
         config.ollamaApiKey,
         config.ollamaModel || "kimi-k2.5:cloud",
         {
+          archetypeId: this.archetypeId,
           trainerUrl: config.trainerUrl,
           reporter: options.reporter || null,
         }
@@ -85,8 +89,12 @@ class SmartBot {
   async initBrain(trainerUrl) {
     this.brain = new AgentBrain(this.agentId, trainerUrl, {
       modelAlias: this.modelAlias,
+      modelVersion: this.modelVersion,
+      policyFamily: this.policyFamily,
+      archetypeId: this.archetypeId,
       rewardConfig: this.config.reward,
       reporter: this.reporter,
+      strategyProvider: () => this.strategicBrain?.getStrategyVector?.() || null,
     });
     await this.brain.init();
     this.brain.resetMatch();
@@ -313,6 +321,8 @@ class SmartBot {
       stateUpdates: this._stateUpdatesSeen,
       modelAlias: this.modelAlias,
       modelVersion: this.brain?.modelVersion || 0,
+      policyFamily: this.policyFamily,
+      archetypeId: this.archetypeId,
     };
   }
 

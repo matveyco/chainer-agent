@@ -6,22 +6,23 @@
   "scripts": {
     "start": "node src/index.js",
     "dashboard": "node web/server.js",
+    "doctor": "node scripts/doctor.js",
     "test": "node --test test/*.test.js",
     "test:connect": "node src/index.js --test-connect",
     "test:smoke": "node scripts/smoke-test.js"
   },
   "engines": {
-    "node": ">=18.17.0"
+    "node": ">=20.20.0"
   },
   "dependencies": {
-    "blessed": "^0.1.81",
-    "blessed-contrib": "^4.11.0",
+    "blessed": "0.1.81",
+    "blessed-contrib": "4.11.0",
     "colyseus.js": "0.15.28",
-    "dotenv": "^17.3.1",
-    "express": "^5.2.1",
-    "long": "^5.2.3",
-    "neataptic": "^1.4.7",
-    "onnxruntime-node": "^1.24.3",
-    "protobufjs": "^7.3.2"
+    "dotenv": "17.3.1",
+    "express": "5.2.1",
+    "long": "5.2.3",
+    "neataptic": "1.4.7",
+    "onnxruntime-node": "1.24.3",
+    "protobufjs": "7.3.2"
   }
 }

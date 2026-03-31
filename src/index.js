@@ -10,59 +10,37 @@
  *   node src/index.js --endpoint https://… # Override server endpoint
  */
 
-require("dotenv").config();
+require("dotenv").config({ quiet: true });
 
 const fs = require("fs");
-const path = require("path");
 const { Trainer } = require("./evolution/Trainer");
 const { Dashboard } = require("./metrics/Dashboard");
 const { generateID } = require("./network/Protocol");
+const {
+  applyCliPatches,
+  applyEnvOverrides,
+  loadConfig,
+  parseCliArgs,
+  validateEnvContract,
+  validateRuntimeVersions,
+} = require("./runtime/ConfigContract");
 const logger = require("./utils/logger");
 
-// Load config (defaults from file, overridden by env vars)
-const config = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "../config/default.json"), "utf-8")
-);
-
-// Apply environment variable overrides
-config.server.endpoint = process.env.GAME_SERVER_URL || null;
-config.trainerUrl = process.env.TRAINER_URL || "http://localhost:5555";
-if (process.env.ROOM_NAME) config.server.roomName = process.env.ROOM_NAME;
-if (process.env.MAP_NAME) config.server.mapName = process.env.MAP_NAME;
-if (process.env.WEAPON_TYPE) config.server.weaponType = process.env.WEAPON_TYPE;
-if (process.env.POPULATION_SIZE) config.rooms.agentsPerRoom = parseInt(process.env.POPULATION_SIZE, 10);
-if (process.env.MATCH_TIMEOUT) config.bot.matchTimeout = parseInt(process.env.MATCH_TIMEOUT);
-if (process.env.NUM_ROOMS) config.rooms.count = parseInt(process.env.NUM_ROOMS, 10);
-if (process.env.SELECTION_INTERVAL) config.training.selectionInterval = parseInt(process.env.SELECTION_INTERVAL, 10);
-if (process.env.NUM_CULL) config.training.numCull = parseInt(process.env.NUM_CULL, 10);
-if (process.env.SUPERVISOR_PORT) config.runtime.port = parseInt(process.env.SUPERVISOR_PORT, 10);
-if (process.env.BOT_ROSTER_PATH) config.persistence.rosterFile = process.env.BOT_ROSTER_PATH;
-config.server.authKey = process.env.OAUTH_API_KEY || null;
-config.ollamaApiKey = process.env.OLLAMA_CLOUD_API_KEY || null;
-config.ollamaModel = process.env.DEEP_ANALYSIS_MODEL || "kimi-k2.5:cloud";
+let config = applyEnvOverrides(loadConfig(), process.env);
 
 // Parse CLI args (highest priority)
-const args = process.argv.slice(2);
-const flags = {};
-for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--resume") {
-    flags.resume = args[i + 1] && !args[i + 1].startsWith("--") ? args[++i] : true;
-  } else if (args[i] === "--watch") {
-    flags.watch = args[i + 1] && !args[i + 1].startsWith("--") ? args[++i] : true;
-  } else if (args[i] === "--population") {
-    config.rooms.agentsPerRoom = parseInt(args[++i], 10);
-  } else if (args[i] === "--endpoint") {
-    config.server.endpoint = args[++i];
-  } else if (args[i] === "--test-connect") {
-    flags.testConnect = true;
-  }
-}
+const { flags, patches } = parseCliArgs(process.argv.slice(2));
+config = applyCliPatches(config, patches);
 
 // Validate required config
-if (!config.server.endpoint) {
-  console.error("Error: GAME_SERVER_URL is required.");
-  console.error("Set it in .env file or pass --endpoint https://your-server.com");
-  console.error("See .env.example for reference.");
+const envValidation = validateEnvContract(config, process.env);
+const runtimeValidation = validateRuntimeVersions(config);
+const validationErrors = [...envValidation.errors, ...runtimeValidation.errors];
+if (validationErrors.length > 0) {
+  console.error("Error: production config validation failed.");
+  for (const message of validationErrors) {
+    console.error(` - ${message}`);
+  }
   process.exit(1);
 }
 

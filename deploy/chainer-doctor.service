@@ -1,0 +1,14 @@
+[Unit]
+Description=Chainer Agent - Deployment Doctor Preflight
+After=network.target
+
+[Service]
+Type=oneshot
+User=m
+WorkingDirectory=/home/m/chainer-agent
+EnvironmentFile=/home/m/chainer-agent/.env
+ExecStart=/usr/bin/node scripts/doctor.js --service deploy
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

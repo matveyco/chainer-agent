@@ -7,6 +7,7 @@ class RuntimeState {
     this.eventsLimit = config.runtime?.eventsLimit || 200;
     this.stateFile = config.persistence?.runtimeStateFile || "data/runtime_state.json";
     this.eventsFile = config.persistence?.runtimeEventsFile || "data/runtime_events.jsonl";
+    this.matchesFile = config.persistence?.matchSummariesFile || "data/match_summaries.jsonl";
     this.state = {
       runId: `${Date.now()}-${process.pid}`,
       pid: process.pid,
@@ -27,6 +28,7 @@ class RuntimeState {
         lastSelectionAt: null,
         lastError: null,
         lastLoopAt: null,
+        currentMode: "training",
       },
       trainer: {
         reachable: false,
@@ -54,6 +56,8 @@ class RuntimeState {
         llmFailures: 0,
         inputsSent: 0,
         stateUpdates: 0,
+        evaluationRuns: 0,
+        evaluationFailures: 0,
       },
       observations: {
         queueWaitMsAvg: 0,
@@ -63,6 +67,12 @@ class RuntimeState {
       },
       rooms: [],
       events: [],
+      matches: [],
+      evaluation: {
+        current: null,
+        queue: [],
+        history: [],
+      },
     };
     this.observationSamples = new Map();
     this.flushTimer = null;
@@ -94,6 +104,11 @@ class RuntimeState {
     this.state.supervisor.activeRunnerCount = count;
   }
 
+  setMode(mode) {
+    this.state.supervisor.currentMode = mode || "training";
+    this.state.supervisor.lastLoopAt = new Date().toISOString();
+  }
+
   setTrainerStatus(patch) {
     Object.assign(this.state.trainer, patch);
   }
@@ -117,6 +132,9 @@ class RuntimeState {
         lastMatchStartedAt: null,
         lastMatchEndedAt: null,
         lastError: null,
+        mode: "training",
+        jobId: null,
+        templateId: null,
       };
     }
     return this.state.rooms[roomIndex];
@@ -175,6 +193,24 @@ class RuntimeState {
     this.state.supervisor.totalMatches += 1;
   }
 
+  recordMatchSummary(summary) {
+    this.state.matches.unshift(summary);
+    if (this.state.matches.length > this.eventsLimit) {
+      this.state.matches.length = this.eventsLimit;
+    }
+    const resolved = path.resolve(this.matchesFile);
+    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    fs.appendFile(resolved, JSON.stringify(summary) + "\n", () => {});
+  }
+
+  setEvaluationSnapshot(snapshot) {
+    this.state.evaluation = JSON.parse(JSON.stringify(snapshot || {
+      current: null,
+      queue: [],
+      history: [],
+    }));
+  }
+
   getSystemSnapshot() {
     return JSON.parse(JSON.stringify({
       runId: this.state.runId,
@@ -195,6 +231,14 @@ class RuntimeState {
 
   getEventsSnapshot(limit = this.eventsLimit) {
     return JSON.parse(JSON.stringify(this.state.events.slice(0, limit)));
+  }
+
+  getMatchSummariesSnapshot(limit = this.eventsLimit) {
+    return JSON.parse(JSON.stringify(this.state.matches.slice(0, limit)));
+  }
+
+  getEvaluationSnapshot() {
+    return JSON.parse(JSON.stringify(this.state.evaluation));
   }
 
   toMetrics() {
