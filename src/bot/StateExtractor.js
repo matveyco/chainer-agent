@@ -30,7 +30,7 @@
 
 const { clamp, getArrayLength } = require("../utils/math");
 
-const INPUT_COUNT = 18;
+const INPUT_COUNT = 24;
 const ARENA_SIZE = 60;
 const MAX_HEALTH = 100;
 const MAX_SPEED = 7;
@@ -71,7 +71,7 @@ class StateExtractor {
    * @param {number} weaponRange - Weapon target distance
    * @param {boolean} cooldownActive - Whether weapon is on cooldown
    * @param {Object} playerData - room.state.players data (score, kills, deaths)
-   * @returns {Float32Array} 18-element normalized input vector
+   * @returns {Float32Array} 24-element normalized input vector
    */
   extract(gameState, myId, weaponRange, cooldownActive, playerData) {
     const v = this.inputVector;
