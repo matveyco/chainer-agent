@@ -3,510 +3,669 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Chainer Agent — Training Dashboard</title>
+  <title>Chainer Agent Operator Console</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'SF Mono', 'Fira Code', monospace; background: #0a0a0f; color: #e0e0e0; }
-    a { color: #6bf; text-decoration: none; }
-
-    .header {
-      background: linear-gradient(135deg, #1a1a2e, #16213e);
-      padding: 20px 30px;
-      border-bottom: 1px solid #333;
-      display: flex; justify-content: space-between; align-items: center;
-    }
-    .header h1 { font-size: 20px; color: #fff; }
-    .header h1 span { color: #6bf; }
-    .status-bar { display: flex; gap: 20px; font-size: 13px; color: #aaa; }
-    .status-bar .live { color: #4f4; }
-    .status-bar .dead { color: #f44; }
-
-    .grid {
-      display: grid; grid-template-columns: 1fr 1fr 1fr 1fr;
-      gap: 15px; padding: 20px 30px;
-    }
-    .card {
-      background: #12121a; border: 1px solid #222; border-radius: 8px;
-      padding: 15px;
-    }
-    .card h3 { font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 8px; }
-    .card .value { font-size: 28px; font-weight: bold; color: #fff; }
-    .card .sub { font-size: 12px; color: #666; margin-top: 4px; }
-
-    .section { padding: 0 30px 20px; }
-    .section h2 {
-      font-size: 16px; color: #888; text-transform: uppercase;
-      margin-bottom: 12px; padding-top: 20px;
-      border-top: 1px solid #1a1a2e;
+    :root {
+      --bg: #09111b;
+      --panel: #101b29;
+      --panel-alt: #152234;
+      --line: #24384f;
+      --text: #edf4ff;
+      --muted: #8fa6c3;
+      --accent: #7cf0d3;
+      --warn: #ffce6b;
+      --danger: #ff7c7c;
+      --good: #7efc99;
     }
 
-    .controls { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "IBM Plex Mono", "SF Mono", monospace;
+      background:
+        radial-gradient(circle at top left, rgba(124,240,211,0.14), transparent 30%),
+        radial-gradient(circle at top right, rgba(124,170,240,0.12), transparent 28%),
+        var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    button, input, select {
+      font: inherit;
+      color: inherit;
+    }
+    .shell {
+      width: min(1500px, 100%);
+      margin: 0 auto;
+      padding: 24px 18px 48px;
+    }
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: flex-end;
+      margin-bottom: 20px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(16,27,41,0.96), rgba(12,20,31,0.86));
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+    }
+    .hero h1 {
+      font-size: clamp(26px, 3vw, 42px);
+      letter-spacing: -0.04em;
+      max-width: 720px;
+      line-height: 1.05;
+    }
+    .hero p {
+      margin-top: 10px;
+      color: var(--muted);
+      max-width: 760px;
+      line-height: 1.55;
+    }
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03);
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      white-space: nowrap;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--danger);
+      box-shadow: 0 0 0 6px rgba(255,124,124,0.12);
+    }
+    .status-chip.live .status-dot { background: var(--good); box-shadow: 0 0 0 6px rgba(126,252,153,0.12); }
+    .status-chip.warn .status-dot { background: var(--warn); box-shadow: 0 0 0 6px rgba(255,206,107,0.12); }
+
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+    .card, .panel {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(16,27,41,0.94), rgba(9,17,27,0.96));
+      padding: 18px;
+    }
+    .card h3, .panel h2 {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-bottom: 10px;
+    }
+    .card .value {
+      font-size: 28px;
+      line-height: 1;
+      margin-bottom: 8px;
+    }
+    .card .meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .two-col {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .controls { display: flex; gap: 10px; flex-wrap: wrap; }
     .btn {
-      padding: 8px 16px; border: 1px solid #333; border-radius: 6px;
-      background: #1a1a2e; color: #e0e0e0; cursor: pointer; font-size: 13px;
-      font-family: inherit; transition: all 0.2s;
+      padding: 10px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03);
+      cursor: pointer;
+      transition: 0.2s ease;
     }
-    .btn:hover { background: #252545; border-color: #6bf; }
-    .btn.danger { border-color: #f44; color: #f88; }
-    .btn.danger:hover { background: #2a1515; }
-    .btn.success { border-color: #4f4; color: #8f8; }
-    .btn.success:hover { background: #152a15; }
+    .btn:hover { transform: translateY(-1px); border-color: var(--accent); }
+    .btn.success { border-color: rgba(126,252,153,0.5); color: var(--good); }
+    .btn.danger { border-color: rgba(255,124,124,0.5); color: var(--danger); }
 
     table {
-      width: 100%; border-collapse: collapse; font-size: 13px;
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 12px;
+      border-top: 1px solid rgba(143,166,195,0.12);
+      vertical-align: top;
     }
     th {
-      text-align: left; padding: 10px 12px; background: #1a1a2e;
-      color: #888; font-weight: normal; text-transform: uppercase; font-size: 11px;
-      cursor: pointer; user-select: none;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      cursor: pointer;
+      background: rgba(255,255,255,0.02);
     }
-    th:hover { color: #6bf; }
-    td {
-      padding: 10px 12px; border-top: 1px solid #1a1a2e;
-    }
-    tr:hover td { background: #15152a; }
-    .rank { color: #888; }
-    .rank-1 { color: #ffd700; font-weight: bold; }
-    .rank-2 { color: #c0c0c0; }
-    .rank-3 { color: #cd7f32; }
-    .score-high { color: #4f4; }
-    .score-low { color: #f88; }
-    .kd-good { color: #4f4; }
-    .kd-bad { color: #f88; }
+    tbody tr:hover td { background: rgba(255,255,255,0.02); }
+    .good { color: var(--good); }
+    .warn { color: var(--warn); }
+    .danger { color: var(--danger); }
+    .muted { color: var(--muted); }
+    .tiny { font-size: 11px; color: var(--muted); }
 
-    .agent-actions { display: flex; gap: 5px; }
-    .agent-actions button {
-      padding: 3px 8px; border: 1px solid #333; border-radius: 4px;
-      background: transparent; color: #888; cursor: pointer; font-size: 11px;
-      font-family: inherit;
+    .events {
+      display: grid;
+      gap: 10px;
+      max-height: 420px;
+      overflow: auto;
     }
-    .agent-actions button:hover { color: #6bf; border-color: #6bf; }
-    .agent-actions button.delete:hover { color: #f44; border-color: #f44; }
+    .event {
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(143,166,195,0.12);
+      background: rgba(255,255,255,0.02);
+    }
+    .event .head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .event .msg { line-height: 1.5; font-size: 13px; }
 
-    .chart-container {
-      background: #12121a; border: 1px solid #222; border-radius: 8px;
-      padding: 15px; margin-top: 15px; min-height: 200px;
-    }
-    .chart-container h3 { font-size: 12px; color: #888; margin-bottom: 10px; }
     .sparkline {
-      display: flex; align-items: flex-end; gap: 2px; height: 80px;
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 58px;
     }
     .sparkline .bar {
-      flex: 1; background: #6bf; border-radius: 1px 1px 0 0;
-      min-width: 3px; transition: height 0.3s;
+      flex: 1;
+      min-width: 3px;
+      border-radius: 2px 2px 0 0;
+      background: linear-gradient(180deg, var(--accent), #4a8cff);
     }
+    .metric-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 18px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .metric-list strong { color: var(--text); }
 
     .modal-overlay {
-      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
-      z-index: 100; justify-content: center; align-items: center;
+      position: fixed;
+      inset: 0;
+      display: none;
+      background: rgba(4, 8, 14, 0.78);
+      padding: 24px;
+      z-index: 20;
+      overflow: auto;
     }
-    .modal-overlay.active { display: flex; }
+    .modal-overlay.active { display: block; }
     .modal {
-      background: #12121a; border: 1px solid #333; border-radius: 12px;
-      padding: 25px; min-width: 400px; max-width: 600px;
+      width: min(820px, 100%);
+      margin: 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: #0d1520;
+      padding: 20px;
     }
-    .modal h3 { margin-bottom: 15px; color: #fff; }
-    .modal select, .modal input {
-      width: 100%; padding: 8px; margin-bottom: 10px;
-      background: #1a1a2e; border: 1px solid #333; border-radius: 4px;
-      color: #e0e0e0; font-family: inherit; font-size: 13px;
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
     }
-
     .toast {
-      position: fixed; bottom: 20px; right: 20px; padding: 12px 20px;
-      background: #1a1a2e; border: 1px solid #333; border-radius: 8px;
-      color: #4f4; font-size: 13px; z-index: 200;
-      transform: translateY(100px); transition: transform 0.3s;
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      padding: 12px 16px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #0f1a28;
+      transform: translateY(120px);
+      transition: transform 0.25s ease;
+      z-index: 30;
     }
     .toast.show { transform: translateY(0); }
 
-    @media (max-width: 900px) {
-      .grid { grid-template-columns: 1fr 1fr; }
+    @media (max-width: 1100px) {
+      .card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .two-col { grid-template-columns: 1fr; }
+      .hero { flex-direction: column; align-items: flex-start; }
+    }
+    @media (max-width: 720px) {
+      .card-grid { grid-template-columns: 1fr; }
+      .metric-list { grid-template-columns: 1fr; }
+      th:nth-child(6), td:nth-child(6),
+      th:nth-child(7), td:nth-child(7),
+      th:nth-child(8), td:nth-child(8) { display: none; }
     }
   </style>
 </head>
 <body>
-
-<div class="header">
-  <h1><span>Chainer</span> Agent Dashboard</h1>
-  <div class="status-bar">
-    <span id="status-indicator" class="dead">OFFLINE</span>
-    <span id="status-device">-</span>
-    <span id="status-uptime">-</span>
-    <span id="status-matches">-</span>
-  </div>
-</div>
-
-<div class="grid">
-  <div class="card">
-    <h3>Total Agents</h3>
-    <div class="value" id="card-agents">-</div>
-    <div class="sub" id="card-agents-sub">-</div>
-  </div>
-  <div class="card">
-    <h3>Best Score (avg50)</h3>
-    <div class="value" id="card-best-score">-</div>
-    <div class="sub" id="card-best-agent">-</div>
-  </div>
-  <div class="card">
-    <h3>Best K/D (avg50)</h3>
-    <div class="value" id="card-best-kd">-</div>
-    <div class="sub" id="card-best-kd-agent">-</div>
-  </div>
-  <div class="card">
-    <h3>Total Train Steps</h3>
-    <div class="value" id="card-train-steps">-</div>
-    <div class="sub" id="card-experiences">-</div>
-  </div>
-</div>
-
-<div class="section">
-  <h2>Controls</h2>
-  <div class="controls">
-    <button class="btn success" onclick="triggerSelection()">Natural Selection (cull 5)</button>
-    <button class="btn" onclick="openCloneModal()">Clone Agent</button>
-    <button class="btn" onclick="refreshStats()">Refresh</button>
-  </div>
-</div>
-
-<div class="section">
-  <h2>Agent Leaderboard</h2>
-  <table>
-    <thead>
-      <tr>
-        <th onclick="sortBy('rank')">#</th>
-        <th onclick="sortBy('agent_id')">Agent</th>
-        <th onclick="sortBy('avg_score_50')">Avg Score</th>
-        <th onclick="sortBy('best_score')">Best Score</th>
-        <th onclick="sortBy('avg_kd_50')">Avg K/D</th>
-        <th onclick="sortBy('model_version')">Version</th>
-        <th onclick="sortBy('episodes')">Episodes</th>
-        <th onclick="sortBy('train_steps')">Trained</th>
-        <th onclick="sortBy('buffer_size')">Buffer</th>
-        <th>Score Trend</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody id="agent-table"></tbody>
-  </table>
-</div>
-
-<!-- Clone Modal -->
-<div class="modal-overlay" id="clone-modal">
-  <div class="modal">
-    <h3>Clone Agent</h3>
-    <label style="color:#888;font-size:12px">Source (strong agent to copy from)</label>
-    <select id="clone-source"></select>
-    <label style="color:#888;font-size:12px">Target (weak agent to replace)</label>
-    <select id="clone-target"></select>
-    <label style="color:#888;font-size:12px">Mutation rate (0 = exact copy)</label>
-    <input id="clone-mutation" type="number" value="0.02" step="0.01" min="0" max="0.5">
-    <div style="display:flex;gap:10px;margin-top:10px">
-      <button class="btn success" onclick="doClone()">Clone</button>
-      <button class="btn" onclick="closeCloneModal()">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- Agent Detail Modal -->
-<div class="modal-overlay" id="agent-detail-modal">
-  <div class="modal" style="min-width:600px;max-width:800px;max-height:85vh;overflow-y:auto">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px">
-      <h3 id="detail-title">Agent Details</h3>
-      <button class="btn" onclick="closeDetail()" style="padding:4px 10px">X</button>
-    </div>
-    <div id="detail-content">Loading...</div>
-  </div>
-</div>
-
-<div class="toast" id="toast"></div>
-
-<script>
-let agents = [];
-let sortField = 'avg_score_50';
-let sortDir = -1;
-
-async function refreshStats() {
-  try {
-    const res = await fetch('/api/stats');
-    const data = await res.json();
-
-    if (data.error) {
-      document.getElementById('status-indicator').className = 'dead';
-      document.getElementById('status-indicator').textContent = 'OFFLINE';
-      return;
-    }
-
-    // Status bar
-    document.getElementById('status-indicator').className = 'live';
-    document.getElementById('status-indicator').textContent = 'LIVE';
-    document.getElementById('status-device').textContent = data.gpu || data.device;
-    document.getElementById('status-uptime').textContent = 'Up: ' + (data.uptime_human || '-');
-    document.getElementById('status-matches').textContent = 'Exp: ' + (data.total_experiences || 0).toLocaleString();
-
-    agents = data.agents || [];
-
-    // Cards
-    document.getElementById('card-agents').textContent = agents.length;
-    document.getElementById('card-agents-sub').textContent = `${data.errors || 0} errors`;
-
-    if (agents.length > 0) {
-      const bestScore = agents.reduce((a, b) => a.avg_score_50 > b.avg_score_50 ? a : b);
-      document.getElementById('card-best-score').textContent = bestScore.avg_score_50;
-      document.getElementById('card-best-agent').textContent = bestScore.agent_id;
-
-      const bestKD = agents.reduce((a, b) => a.avg_kd_50 > b.avg_kd_50 ? a : b);
-      document.getElementById('card-best-kd').textContent = bestKD.avg_kd_50;
-      document.getElementById('card-best-kd-agent').textContent = bestKD.agent_id;
-    }
-
-    document.getElementById('card-train-steps').textContent = (data.total_train_steps || 0).toLocaleString();
-    document.getElementById('card-experiences').textContent = (data.total_experiences || 0).toLocaleString() + ' exp';
-
-    renderTable();
-  } catch (err) {
-    document.getElementById('status-indicator').className = 'dead';
-    document.getElementById('status-indicator').textContent = 'OFFLINE';
-  }
-}
-
-function renderTable() {
-  const sorted = [...agents].sort((a, b) => {
-    const va = a[sortField] ?? 0;
-    const vb = b[sortField] ?? 0;
-    if (typeof va === 'string') return sortDir * va.localeCompare(vb);
-    return sortDir * (vb - va);
-  });
-
-  const tbody = document.getElementById('agent-table');
-  tbody.innerHTML = sorted.map((a, i) => {
-    const rankClass = i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : 'rank';
-    const scoreClass = a.avg_score_50 > 500 ? 'score-high' : a.avg_score_50 < 100 ? 'score-low' : '';
-    const kdClass = a.avg_kd_50 >= 1.5 ? 'kd-good' : a.avg_kd_50 < 0.5 ? 'kd-bad' : '';
-
-    const sparkline = (a.score_history || []).map(s => {
-      const max = Math.max(...(a.score_history || [1]), 1);
-      const h = Math.max(3, (s / max) * 60);
-      return `<div class="bar" style="height:${h}px" title="${s}"></div>`;
-    }).join('');
-
-    return `<tr>
-      <td class="${rankClass}">${i + 1}</td>
-      <td><a href="#" onclick="showDetail('${a.agent_id}');return false" style="color:#6bf"><strong>${a.agent_id}</strong></a></td>
-      <td class="${scoreClass}">${a.avg_score_50}</td>
-      <td>${a.best_score}</td>
-      <td class="${kdClass}">${a.avg_kd_50}</td>
-      <td>v${a.model_version}</td>
-      <td>${a.episodes}</td>
-      <td>${a.train_steps}</td>
-      <td>${a.buffer_size}</td>
-      <td><div class="sparkline">${sparkline}</div></td>
-      <td class="agent-actions">
-        <button onclick="showDetail('${a.agent_id}')" title="View details">View</button>
-        <button onclick="resetAgent('${a.agent_id}')" class="delete" title="Reset">Reset</button>
-      </td>
-    </tr>`;
-  }).join('');
-}
-
-function sortBy(field) {
-  if (sortField === field) sortDir *= -1;
-  else { sortField = field; sortDir = -1; }
-  renderTable();
-}
-
-async function triggerSelection() {
-  if (!confirm('Run natural selection? This will replace the 5 weakest agents with mutated clones of the 5 strongest.')) return;
-  try {
-    const res = await fetch('/api/select', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-    const data = await res.json();
-    showToast('Natural selection complete');
-    refreshStats();
-  } catch (err) {
-    showToast('Selection failed: ' + err.message);
-  }
-}
-
-async function resetAgent(agentId) {
-  if (!confirm(`Reset ${agentId}? This will wipe its learned weights and start fresh.`)) return;
-  try {
-    await fetch(`/api/agent/${agentId}/reset`, { method: 'POST' });
-    showToast(`${agentId} reset to random`);
-    refreshStats();
-  } catch (err) {
-    showToast('Reset failed: ' + err.message);
-  }
-}
-
-function openCloneModal() {
-  const srcSelect = document.getElementById('clone-source');
-  const tgtSelect = document.getElementById('clone-target');
-  const sorted = [...agents].sort((a, b) => b.avg_score_50 - a.avg_score_50);
-
-  srcSelect.innerHTML = sorted.map(a =>
-    `<option value="${a.agent_id}">${a.agent_id} (score: ${a.avg_score_50}, kd: ${a.avg_kd_50})</option>`
-  ).join('');
-
-  const weakFirst = [...agents].sort((a, b) => a.avg_score_50 - b.avg_score_50);
-  tgtSelect.innerHTML = weakFirst.map(a =>
-    `<option value="${a.agent_id}">${a.agent_id} (score: ${a.avg_score_50})</option>`
-  ).join('');
-
-  document.getElementById('clone-modal').classList.add('active');
-}
-
-function closeCloneModal() {
-  document.getElementById('clone-modal').classList.remove('active');
-}
-
-async function doClone() {
-  const source = document.getElementById('clone-source').value;
-  const target = document.getElementById('clone-target').value;
-  const mutation = parseFloat(document.getElementById('clone-mutation').value);
-
-  if (source === target) { showToast('Source and target must be different'); return; }
-
-  try {
-    await fetch(`/api/agent/${target}/clone/${source}`, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ mutation }),
-    });
-    showToast(`Cloned ${source} -> ${target} (mutation: ${mutation})`);
-    closeCloneModal();
-    refreshStats();
-  } catch (err) {
-    showToast('Clone failed: ' + err.message);
-  }
-}
-
-function showToast(msg) {
-  const toast = document.getElementById('toast');
-  toast.textContent = msg;
-  toast.classList.add('show');
-  setTimeout(() => toast.classList.remove('show'), 3000);
-}
-
-// ── Agent Detail View ──
-
-async function showDetail(agentId) {
-  document.getElementById('detail-title').textContent = agentId;
-  document.getElementById('detail-content').innerHTML = 'Loading...';
-  document.getElementById('agent-detail-modal').classList.add('active');
-
-  // Fetch profile + training history in parallel
-  const [profileRes, historyRes, statsRes] = await Promise.all([
-    fetch(`/api/profile/${agentId}`).then(r => r.json()).catch(() => null),
-    fetch(`/api/agent/${agentId}/history`).then(r => r.json()).catch(() => []),
-    fetch('/api/stats').then(r => r.json()).catch(() => ({ agents: [] })),
-  ]);
-
-  const agent = (statsRes.agents || []).find(a => a.agent_id === agentId) || {};
-  const profile = profileRes || {};
-  const history = historyRes || [];
-
-  const personality = profile.personality || {};
-  const strategy = profile.strategy || {};
-  const thoughts = profile.thought_log || [];
-  const matchHist = profile.match_history || [];
-  const lifetime = profile.lifetime || {};
-
-  // Strategy bars
-  const strategyBars = Object.entries(strategy).map(([key, val]) => {
-    const pct = Math.round((val || 0) * 100);
-    const color = pct > 60 ? '#4f4' : pct < 30 ? '#f88' : '#6bf';
-    return `<div style="margin:4px 0">
-      <span style="display:inline-block;width:140px;color:#888;font-size:12px">${key}</span>
-      <div style="display:inline-block;width:200px;background:#1a1a2e;height:16px;border-radius:3px;vertical-align:middle">
-        <div style="width:${pct}%;background:${color};height:100%;border-radius:3px;transition:width 0.5s"></div>
-      </div>
-      <span style="color:#fff;margin-left:8px;font-size:12px">${(val || 0).toFixed(2)}</span>
-    </div>`;
-  }).join('');
-
-  // Match history mini chart
-  const scores = matchHist.map(m => m.score || 0);
-  const maxScore = Math.max(...scores, 1);
-  const matchChart = scores.map(s => {
-    const h = Math.max(3, (s / maxScore) * 80);
-    return `<div class="bar" style="height:${h}px" title="Score: ${s}"></div>`;
-  }).join('');
-
-  // Thought log
-  const thoughtsHtml = thoughts.length > 0
-    ? thoughts.slice(-5).reverse().map(t =>
-      `<div style="background:#1a1a2e;padding:8px 10px;border-radius:4px;margin:5px 0;font-size:12px;color:#ccc">
-        <span style="color:#888">[Match ${t.match}]</span> ${t.thought}
-      </div>`
-    ).join('')
-    : '<div style="color:#666;font-size:12px">No LLM thoughts yet (runs every 3 matches)</div>';
-
-  document.getElementById('detail-content').innerHTML = `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px">
-      <div class="card">
-        <h3>Identity / DNA</h3>
-        <div style="font-size:22px;color:#6bf;margin:5px 0">${personality.archetype || 'Unknown'}</div>
-        <div style="color:#aaa;font-size:12px">${personality.traits || 'No personality assigned'}</div>
-        <div style="color:#666;font-size:11px;margin-top:5px">Seed: ${personality.seed ?? '-'}</div>
-      </div>
-      <div class="card">
-        <h3>Lifetime Stats</h3>
-        <div style="font-size:14px;line-height:1.8">
-          <div>Matches: <strong>${lifetime.matches || agent.episodes || 0}</strong></div>
-          <div>Total Score: <strong>${lifetime.total_score || 0}</strong></div>
-          <div>K/D: <strong style="color:${(lifetime.avg_kd||0) >= 1 ? '#4f4' : '#f88'}">${(lifetime.avg_kd || 0).toFixed(2)}</strong>
-            (${lifetime.total_kills || 0}K / ${lifetime.total_deaths || 0}D)</div>
-          <div>Model: <strong>v${agent.model_version || 0}</strong> (${agent.train_steps || 0} trained)</div>
+  <div class="shell">
+    <section class="hero">
+      <div>
+        <div id="overall-chip" class="status-chip">
+          <span class="status-dot"></span>
+          <span id="overall-label">Checking Runtime</span>
         </div>
+        <h1>Reliable Self-Improving Arena Bots</h1>
+        <p>
+          Operator view for the live Chainer swarm. This console tracks trainer readiness,
+          room fill quality, join failures, live input/state flow, and per-agent learning state.
+        </p>
       </div>
+      <div class="tiny" id="hero-meta">Waiting for telemetry…</div>
+    </section>
+
+    <section class="card-grid">
+      <div class="card">
+        <h3>Supervisor</h3>
+        <div class="value" id="card-supervisor">-</div>
+        <div class="meta" id="card-supervisor-meta">-</div>
+      </div>
+      <div class="card">
+        <h3>Trainer</h3>
+        <div class="value" id="card-trainer">-</div>
+        <div class="meta" id="card-trainer-meta">-</div>
+      </div>
+      <div class="card">
+        <h3>Room Fill Avg</h3>
+        <div class="value" id="card-fill">-</div>
+        <div class="meta" id="card-fill-meta">-</div>
+      </div>
+      <div class="card">
+        <h3>Seat / Join Failures</h3>
+        <div class="value" id="card-failures">-</div>
+        <div class="meta" id="card-failures-meta">-</div>
+      </div>
+      <div class="card">
+        <h3>Training Throughput</h3>
+        <div class="value" id="card-train">-</div>
+        <div class="meta" id="card-train-meta">-</div>
+      </div>
+    </section>
+
+    <section class="two-col">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>System Snapshot</h2>
+          <div class="controls">
+            <button class="btn success" onclick="triggerSelection()">Natural Selection</button>
+            <button class="btn" onclick="refreshAll()">Refresh</button>
+          </div>
+        </div>
+        <div class="metric-list" id="system-metrics"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Recent Events</h2>
+          <div class="tiny" id="events-meta">-</div>
+        </div>
+        <div id="events-list" class="events"></div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-bottom:16px;">
+      <div class="panel-header">
+        <h2>Room Health</h2>
+        <div class="tiny" id="rooms-meta">-</div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Room</th>
+            <th>Status</th>
+            <th>Room ID</th>
+            <th>Assigned</th>
+            <th>Connected</th>
+            <th>Live Players</th>
+            <th>Queue Wait</th>
+            <th>State / Inputs</th>
+            <th>Last Error</th>
+          </tr>
+        </thead>
+        <tbody id="rooms-table"></tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Agent Leaderboard</h2>
+        <div class="tiny" id="agents-meta">-</div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th onclick="sortBy('agent_id')">Agent</th>
+            <th onclick="sortBy('avg_score_50')">Avg Score</th>
+            <th onclick="sortBy('avg_kd_50')">Avg K/D</th>
+            <th onclick="sortBy('avg_damage_50')">Avg Dmg</th>
+            <th onclick="sortBy('model_version')">Version</th>
+            <th>Aliases</th>
+            <th onclick="sortBy('episodes')">Episodes</th>
+            <th onclick="sortBy('train_steps')">Train Steps</th>
+            <th>Score Trend</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="agents-table"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <div class="modal-overlay" id="agent-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="modal-title">Agent</h2>
+        <button class="btn" onclick="closeAgentModal()">Close</button>
+      </div>
+      <div id="modal-content">Loading…</div>
     </div>
+  </div>
 
-    <div class="card" style="margin-top:15px">
-      <h3>Current Strategy</h3>
-      ${strategyBars || '<div style="color:#666">No strategy data (LLM not active)</div>'}
-    </div>
+  <div class="toast" id="toast"></div>
 
-    <div class="card" style="margin-top:15px">
-      <h3>Current Plan</h3>
-      <div style="color:#fff;font-size:14px;padding:5px 0">${profile.current_plan || 'No plan yet'}</div>
-    </div>
+  <script>
+    let agentStats = [];
+    let runtimeState = null;
+    let runtimeRooms = [];
+    let runtimeEvents = [];
+    let profiles = {};
+    let sortField = 'avg_score_50';
+    let sortDir = -1;
 
-    <div class="card" style="margin-top:15px">
-      <h3>LLM Strategic Thoughts</h3>
-      ${thoughtsHtml}
-    </div>
+    async function fetchJSON(url) {
+      const res = await fetch(url);
+      return res.json();
+    }
 
-    <div class="card" style="margin-top:15px">
-      <h3>Score History (last ${scores.length} matches)</h3>
-      <div class="sparkline" style="height:80px">${matchChart}</div>
-    </div>
+    async function refreshAll() {
+      try {
+        const [system, rooms, events, stats, profileMap] = await Promise.all([
+          fetchJSON('/api/system'),
+          fetchJSON('/api/rooms'),
+          fetchJSON('/api/events?limit=25'),
+          fetchJSON('/api/stats'),
+          fetchJSON('/api/profiles')
+        ]);
 
-    <div class="card" style="margin-top:15px">
-      <h3>Training History (PPO)</h3>
-      <div style="color:#888;font-size:12px">${history.length} training log entries</div>
-      ${history.length > 0 ? `<div style="max-height:150px;overflow-y:auto;margin-top:8px">
-        <table style="font-size:11px;width:100%">
-          <tr><th>Score</th><th>K/D</th><th>Version</th><th>Episodes</th></tr>
-          ${history.slice(-10).reverse().map(h => `<tr>
-            <td>${h.avg_score_50}</td>
-            <td>${h.avg_kd_50}</td>
-            <td>v${h.model_version}</td>
-            <td>${h.episodes}</td>
-          </tr>`).join('')}
-        </table>
-      </div>` : ''}
-    </div>
-  `;
-}
+        runtimeState = system.runtime;
+        runtimeRooms = Array.isArray(rooms) ? rooms : [];
+        runtimeEvents = Array.isArray(events) ? events : [];
+        agentStats = stats.agents || [];
+        profiles = profileMap || {};
 
-function closeDetail() {
-  document.getElementById('agent-detail-modal').classList.remove('active');
-}
+        renderSystem(system, stats);
+        renderRooms();
+        renderEvents();
+        renderAgents();
+      } catch (err) {
+        setToast('Refresh failed: ' + err.message);
+      }
+    }
 
-// Auto-refresh every 5 seconds
-refreshStats();
-setInterval(refreshStats, 5000);
-</script>
+    function renderSystem(system, stats) {
+      const runtime = system.runtime || {};
+      const trainer = system.trainer || {};
+      const trainerReady = !runtime.trainer ? false : !!runtime.trainer.ready;
+      const overallChip = document.getElementById('overall-chip');
+      const runnerCount = runtime.supervisor?.activeRunnerCount || 0;
+      const lastError = runtime.supervisor?.lastError || runtime.trainer?.lastError;
+      const roomFill = runtime.observations?.roomFillRatioAvg || 0;
 
+      let label = 'Degraded';
+      overallChip.className = 'status-chip warn';
+      if (runtime.status === 'running' && trainerReady && runnerCount === 1 && roomFill >= 0.5) {
+        label = 'Healthy Runtime';
+        overallChip.className = 'status-chip live';
+      } else if (!trainerReady || runnerCount > 1 || lastError) {
+        label = 'Attention Needed';
+        overallChip.className = 'status-chip';
+      }
+      document.getElementById('overall-label').textContent = label;
+
+      document.getElementById('hero-meta').textContent =
+        `run ${runtime.runId || '-'} · pid ${runtime.pid || '-'} · started ${runtime.startedAt || '-'}`;
+
+      document.getElementById('card-supervisor').textContent = runtime.status || 'unknown';
+      document.getElementById('card-supervisor-meta').textContent =
+        `${runnerCount} runner(s) · ${runtime.supervisor?.totalMatches || 0} matches`;
+
+      document.getElementById('card-trainer').textContent = trainerReady ? 'ready' : 'not ready';
+      document.getElementById('card-trainer-meta').textContent =
+        `${runtime.trainer?.latencyMs ?? '-'} ms · queue ${trainer.export_queue_depth ?? 0}`;
+
+      document.getElementById('card-fill').textContent = `${Math.round(roomFill * 100)}%`;
+      document.getElementById('card-fill-meta').textContent =
+        `${runtime.observations?.queueWaitMsAvg ?? '-'} ms queue avg`;
+
+      const seatExpired = runtime.counters?.seatExpired || 0;
+      const joinFailures = runtime.counters?.joinFailures || 0;
+      document.getElementById('card-failures').textContent = `${seatExpired} / ${joinFailures}`;
+      document.getElementById('card-failures-meta').textContent =
+        `${runtime.counters?.lockedRooms || 0} locked · ${runtime.counters?.schemaCrashes || 0} schema`;
+
+      document.getElementById('card-train').textContent = `${trainer.total_train_steps || 0}`;
+      document.getElementById('card-train-meta').textContent =
+        `${trainer.total_experiences || 0} exp · ${trainer.num_agents || 0} agents`;
+
+      const metrics = [
+        ['Trainer Reachable', runtime.trainer?.reachable ? 'yes' : 'no'],
+        ['Trainer Ready', trainerReady ? 'yes' : 'no'],
+        ['Trainer Latency', `${runtime.trainer?.latencyMs ?? '-'} ms`],
+        ['Selection Runs', runtime.supervisor?.selectionRuns || 0],
+        ['Inputs Sent', runtime.counters?.inputsSent || 0],
+        ['State Updates', runtime.counters?.stateUpdates || 0],
+        ['Model Fetch Failures', runtime.counters?.modelFetchFailures || 0],
+        ['LLM Analyses', runtime.counters?.llmAnalyses || 0],
+        ['LLM Failures', runtime.counters?.llmFailures || 0],
+        ['Last Export Error', trainer.last_export_error || 'none'],
+        ['Last Train Error', trainer.last_train_error || 'none'],
+        ['Last Runtime Error', runtime.supervisor?.lastError || 'none']
+      ];
+
+      document.getElementById('system-metrics').innerHTML = metrics.map(([label, value]) =>
+        `<div>${label}<br><strong>${value}</strong></div>`
+      ).join('');
+    }
+
+    function renderRooms() {
+      document.getElementById('rooms-meta').textContent =
+        `${runtimeRooms.length} configured room workers`;
+
+      const body = document.getElementById('rooms-table');
+      body.innerHTML = runtimeRooms.map((room) => {
+        const statusClass = room.status === 'running'
+          ? 'good'
+          : room.status === 'abandoned' || room.status === 'error'
+            ? 'danger'
+            : 'warn';
+        return `<tr>
+          <td>#${room.roomIndex}</td>
+          <td class="${statusClass}">${room.status || '-'}</td>
+          <td>${room.roomId || '<span class="muted">unassigned</span>'}</td>
+          <td>${room.assignedAgents || 0}/${room.targetAgents || 0}</td>
+          <td>${room.connectedAgents || 0} <span class="tiny">(${Math.round((room.fillRatio || 0) * 100)}%)</span></td>
+          <td>${room.livePlayers || 0}</td>
+          <td>${room.queueWaitMs ?? '-'} ms</td>
+          <td>${room.stateUpdates || 0} / ${room.inputsSent || 0}</td>
+          <td class="${room.lastError ? 'danger' : 'muted'}">${room.lastError || 'none'}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    function renderEvents() {
+      document.getElementById('events-meta').textContent = `${runtimeEvents.length} recent events`;
+      const container = document.getElementById('events-list');
+      container.innerHTML = runtimeEvents.map((event) => {
+        const levelClass = event.level === 'error' ? 'danger' : event.level === 'warn' ? 'warn' : 'good';
+        return `<div class="event">
+          <div class="head">
+            <span class="${levelClass}">${event.level}</span>
+            <span class="muted">${event.ts}</span>
+          </div>
+          <div class="msg">${event.message}</div>
+        </div>`;
+      }).join('') || '<div class="muted">No recent events.</div>';
+    }
+
+    function renderAgents() {
+      document.getElementById('agents-meta').textContent =
+        `${agentStats.length} tracked agents`;
+
+      const sorted = [...agentStats].sort((left, right) => {
+        const a = left[sortField] ?? 0;
+        const b = right[sortField] ?? 0;
+        if (typeof a === 'string') {
+          return sortDir * a.localeCompare(b);
+        }
+        return sortDir * (a - b);
+      });
+
+      document.getElementById('agents-table').innerHTML = sorted.map((agent) => {
+        const scoreHistory = agent.score_history || [];
+        const maxScore = Math.max(...scoreHistory, 1);
+        const sparkline = scoreHistory.map((value) =>
+          `<div class="bar" style="height:${Math.max(5, (value / maxScore) * 58)}px" title="${value}"></div>`
+        ).join('');
+        const aliases = agent.aliases || {};
+        return `<tr>
+          <td><a href="#" onclick="openAgentModal('${agent.agent_id}');return false"><strong>${agent.agent_id}</strong></a></td>
+          <td>${agent.avg_score_50}</td>
+          <td class="${agent.avg_kd_50 >= 1 ? 'good' : 'danger'}">${agent.avg_kd_50}</td>
+          <td>${agent.avg_damage_50 ?? 0}</td>
+          <td>v${agent.model_version}</td>
+          <td class="tiny">L:${aliases.latest ?? '-'} C:${aliases.candidate ?? '-'} H:${aliases.champion ?? '-'}</td>
+          <td>${agent.episodes}</td>
+          <td>${agent.train_steps}</td>
+          <td><div class="sparkline">${sparkline}</div></td>
+          <td>
+            <button class="btn" onclick="openAgentModal('${agent.agent_id}')">View</button>
+            <button class="btn danger" onclick="resetAgent('${agent.agent_id}')">Reset</button>
+          </td>
+        </tr>`;
+      }).join('');
+    }
+
+    function sortBy(field) {
+      if (sortField === field) sortDir *= -1;
+      else {
+        sortField = field;
+        sortDir = -1;
+      }
+      renderAgents();
+    }
+
+    async function triggerSelection() {
+      if (!confirm('Run natural selection now?')) return;
+      try {
+        await fetch('/api/select', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        setToast('Selection triggered');
+        refreshAll();
+      } catch (err) {
+        setToast('Selection failed: ' + err.message);
+      }
+    }
+
+    async function resetAgent(agentId) {
+      if (!confirm(`Reset ${agentId}?`)) return;
+      try {
+        await fetch(`/api/agent/${agentId}/reset`, { method: 'POST' });
+        setToast(`${agentId} reset`);
+        refreshAll();
+      } catch (err) {
+        setToast('Reset failed: ' + err.message);
+      }
+    }
+
+    async function openAgentModal(agentId) {
+      document.getElementById('agent-modal').classList.add('active');
+      document.getElementById('modal-title').textContent = agentId;
+      document.getElementById('modal-content').innerHTML = 'Loading…';
+
+      const [profile, history, aliases, metadata] = await Promise.all([
+        fetchJSON(`/api/profile/${agentId}`).catch(() => ({})),
+        fetchJSON(`/api/agent/${agentId}/history`).catch(() => ([])),
+        fetchJSON(`/api/model/${agentId}/aliases`).catch(() => ({})),
+        fetchJSON(`/api/model/${agentId}/metadata?alias=latest`).catch(() => ({}))
+      ]);
+
+      const agent = agentStats.find((entry) => entry.agent_id === agentId) || {};
+      const thoughts = (profile.thought_log || []).slice(-5).reverse();
+      const strategy = profile.strategy || {};
+      const rewardTotals = agent.last_reward_totals || {};
+      const strategyBars = Object.entries(strategy).map(([key, value]) => {
+        const pct = Math.round((value || 0) * 100);
+        return `<div style="margin:6px 0">
+          <div class="tiny">${key}</div>
+          <div style="height:10px;border-radius:999px;background:#182636;margin-top:4px;overflow:hidden">
+            <div style="width:${pct}%;height:100%;background:linear-gradient(90deg,var(--accent),#4a8cff)"></div>
+          </div>
+        </div>`;
+      }).join('');
+
+      document.getElementById('modal-content').innerHTML = `
+        <div class="metric-list" style="margin-bottom:16px;">
+          <div>Archetype<br><strong>${profile.personality?.archetype || 'unknown'}</strong></div>
+          <div>Model Aliases<br><strong>L:${aliases.latest ?? '-'} C:${aliases.candidate ?? '-'} H:${aliases.champion ?? '-'}</strong></div>
+          <div>Current Plan<br><strong>${profile.current_plan || 'none'}</strong></div>
+          <div>Schema / Version<br><strong>schema ${metadata.schema_version ?? '-'} · v${metadata.model_version ?? agent.model_version ?? '-'}</strong></div>
+          <div>Episodes<br><strong>${agent.episodes || 0}</strong></div>
+          <div>Reward Totals<br><strong>${Object.keys(rewardTotals).length ? JSON.stringify(rewardTotals) : 'none'}</strong></div>
+        </div>
+        <div class="panel" style="margin-bottom:14px;">
+          <h2 style="margin-bottom:10px;">Strategy</h2>
+          ${strategyBars || '<div class="muted">No strategy yet.</div>'}
+        </div>
+        <div class="panel" style="margin-bottom:14px;">
+          <h2 style="margin-bottom:10px;">Recent LLM Thoughts</h2>
+          ${thoughts.map((item) => `<div class="event"><div class="head"><span class="good">match ${item.match}</span><span class="muted">${item.timestamp}</span></div><div class="msg">${item.thought}</div></div>`).join('') || '<div class="muted">No thought history yet.</div>'}
+        </div>
+        <div class="panel">
+          <h2 style="margin-bottom:10px;">Training History</h2>
+          <table>
+            <thead><tr><th>Score</th><th>K/D</th><th>Damage</th><th>Version</th><th>Episodes</th></tr></thead>
+            <tbody>${history.slice(-10).reverse().map((entry) => `<tr><td>${entry.avg_score_50}</td><td>${entry.avg_kd_50}</td><td>${entry.avg_damage_50 ?? 0}</td><td>v${entry.model_version}</td><td>${entry.episodes}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function closeAgentModal() {
+      document.getElementById('agent-modal').classList.remove('active');
+    }
+
+    function setToast(message) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 2500);
+    }
+
+    refreshAll();
+    setInterval(refreshAll, 5000);
+  </script>
 </body>
 </html>

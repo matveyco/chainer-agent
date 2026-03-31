@@ -1,31 +1,20 @@
 #!/usr/bin/env node
 
 /**
- * Chainer Agent — Self-Learning Bots for chainer.io Arena
- *
- * NEAT Neuroevolution-powered bots that fight, learn, and improve
- * across generations in the chainer.io 3rd-person shooter.
+ * Chainer Agent — Self-Improving Arena Bots
  *
  * Usage:
- *   node src/index.js                               # Start fresh training
- *   node src/index.js --resume                       # Resume from latest snapshot
- *   node src/index.js --resume 50                    # Resume from generation 50
- *   node src/index.js --watch                        # Watch best genome play
- *   node src/index.js --watch data/best/gen_50.json  # Watch specific genome
- *   node src/index.js --population 20                # Override population size
- *   node src/index.js --endpoint https://...         # Override server endpoint
- *   node src/index.js --test-connect                 # Test single bot connection
+ *   node src/index.js                      # Start supervised swarm
+ *   node src/index.js --test-connect       # Test single bot connection
+ *   node src/index.js --population 12      # Override agents per room
+ *   node src/index.js --endpoint https://… # Override server endpoint
  */
 
 require("dotenv").config();
 
 const fs = require("fs");
-const path = require("path");
 const { Trainer } = require("./evolution/Trainer");
-const { Genome } = require("./evolution/Genome");
 const { Dashboard } = require("./metrics/Dashboard");
-const { SmartBot } = require("./bot/SmartBot");
-const { GameState } = require("./game/GameState");
 const { generateID } = require("./network/Protocol");
 const logger = require("./utils/logger");
 
@@ -40,11 +29,13 @@ config.trainerUrl = process.env.TRAINER_URL || "http://localhost:5555";
 if (process.env.ROOM_NAME) config.server.roomName = process.env.ROOM_NAME;
 if (process.env.MAP_NAME) config.server.mapName = process.env.MAP_NAME;
 if (process.env.WEAPON_TYPE) config.server.weaponType = process.env.WEAPON_TYPE;
-if (process.env.POPULATION_SIZE) config.evolution.populationSize = parseInt(process.env.POPULATION_SIZE);
+if (process.env.POPULATION_SIZE) config.rooms.agentsPerRoom = parseInt(process.env.POPULATION_SIZE, 10);
 if (process.env.MATCH_TIMEOUT) config.bot.matchTimeout = parseInt(process.env.MATCH_TIMEOUT);
-if (process.env.NUM_ROOMS) config.numRooms = parseInt(process.env.NUM_ROOMS);
-if (process.env.SELECTION_INTERVAL) config.selectionInterval = parseInt(process.env.SELECTION_INTERVAL);
-if (process.env.NUM_CULL) config.numCull = parseInt(process.env.NUM_CULL);
+if (process.env.NUM_ROOMS) config.rooms.count = parseInt(process.env.NUM_ROOMS, 10);
+if (process.env.SELECTION_INTERVAL) config.training.selectionInterval = parseInt(process.env.SELECTION_INTERVAL, 10);
+if (process.env.NUM_CULL) config.training.numCull = parseInt(process.env.NUM_CULL, 10);
+if (process.env.SUPERVISOR_PORT) config.runtime.port = parseInt(process.env.SUPERVISOR_PORT, 10);
+if (process.env.BOT_ROSTER_PATH) config.persistence.rosterFile = process.env.BOT_ROSTER_PATH;
 config.server.authKey = process.env.OAUTH_API_KEY || null;
 config.ollamaApiKey = process.env.OLLAMA_CLOUD_API_KEY || null;
 config.ollamaModel = process.env.DEEP_ANALYSIS_MODEL || "kimi-k2.5:cloud";
@@ -58,7 +49,7 @@ for (let i = 0; i < args.length; i++) {
   } else if (args[i] === "--watch") {
     flags.watch = args[i + 1] && !args[i + 1].startsWith("--") ? args[++i] : true;
   } else if (args[i] === "--population") {
-    config.evolution.populationSize = parseInt(args[++i]);
+    config.rooms.agentsPerRoom = parseInt(args[++i], 10);
   } else if (args[i] === "--endpoint") {
     config.server.endpoint = args[++i];
   } else if (args[i] === "--test-connect") {
@@ -75,9 +66,14 @@ if (!config.server.endpoint) {
 }
 
 // Ensure data directories exist
-fs.mkdirSync(config.persistence.generationsDir, { recursive: true });
-fs.mkdirSync(config.persistence.bestDir, { recursive: true });
-fs.mkdirSync(config.persistence.logsDir, { recursive: true });
+for (const dir of [
+  config.persistence.generationsDir,
+  config.persistence.bestDir,
+  config.persistence.logsDir,
+  "data",
+]) {
+  fs.mkdirSync(dir, { recursive: true });
+}
 
 /**
  * Test mode: connect a single bot to verify connectivity.
@@ -120,84 +116,16 @@ async function testConnect() {
 }
 
 /**
- * Watch mode: load a genome and watch it play.
- */
-async function watchMode() {
-  const { Network } = require("neataptic");
-
-  let genomePath;
-  if (typeof flags.watch === "string") {
-    genomePath = flags.watch;
-  } else {
-    genomePath = Genome.findLatestBest(config.persistence.bestDir);
-  }
-
-  if (!genomePath || !fs.existsSync(genomePath)) {
-    logger.error("No genome found to watch. Train first or specify path.");
-    process.exit(1);
-  }
-
-  logger.info("Loading genome from", genomePath);
-  const genomeJSON = Genome.load(genomePath);
-  const network = Network.fromJSON(genomeJSON);
-
-  const gameState = new GameState();
-  const userID = `watch_${generateID(6)}`;
-  const bot = new SmartBot(userID, network, config);
-
-  logger.info("Connecting bot to", config.server.endpoint);
-
-  await bot.connect(config.server.endpoint, gameState, true, () => {
-    logger.info("Room disposed. Exiting.");
-    bot.dispose();
-    process.exit(0);
-  });
-
-  logger.info(`Bot ${userID} connected. Watching... Press Ctrl+C to stop.`);
-
-  let last = performance.now();
-  setInterval(() => {
-    const now = performance.now();
-    const dt = (now - last) / 1000;
-    last = now;
-    bot.update(dt);
-  }, 1000 / 60);
-
-  setInterval(() => {
-    const stats = bot.fitness.toJSON();
-    logger.info(`K: ${stats.kills} D: ${stats.deaths} Dmg: ${stats.damageDealt} Acc: ${stats.accuracy}%`);
-  }, 10000);
-}
-
-/**
  * Training mode: run the evolution loop.
  */
 async function trainMode() {
   const dashboard = new Dashboard();
   dashboard.init();
 
-  const trainer = new Trainer(config, (summary) => {
-    dashboard.update(summary);
-  });
+  const trainer = new Trainer(config);
 
   if (flags.resume) {
-    let snapshotPath;
-    if (typeof flags.resume === "string") {
-      if (fs.existsSync(flags.resume)) {
-        snapshotPath = flags.resume;
-      } else {
-        snapshotPath = path.join(config.persistence.generationsDir, `gen_${flags.resume}.json`);
-      }
-    } else {
-      snapshotPath = Genome.findLatestPopulation(config.persistence.generationsDir);
-    }
-
-    if (snapshotPath && fs.existsSync(snapshotPath)) {
-      trainer.resumeFrom(snapshotPath);
-      dashboard.log(`Resumed from ${path.basename(snapshotPath)}`);
-    } else {
-      logger.warn("No snapshot found to resume from. Starting fresh.");
-    }
+    logger.warn("--resume is deprecated in the supervised PPO runtime. Starting fresh.");
   }
 
   const shutdown = () => {
@@ -205,7 +133,7 @@ async function trainMode() {
     trainer.stop();
     try {
       const savePath = trainer.saveState();
-      logger.info("Population saved to", savePath);
+      logger.info("Runtime snapshot saved to", savePath);
     } catch (err) {
       logger.error("Failed to save state:", err.message);
     }
@@ -216,8 +144,10 @@ async function trainMode() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  dashboard.log(`Training: ${config.evolution.populationSize} bots @ ${config.server.endpoint}`);
-  logger.info(`Starting NEAT evolution with ${config.evolution.populationSize} bots`);
+  dashboard.log(`Swarm: ${config.rooms.count} rooms × ${config.rooms.agentsPerRoom} agents @ ${config.server.endpoint}`);
+  logger.info(
+    `Starting supervised swarm with ${config.rooms.count} rooms × ${config.rooms.agentsPerRoom} agents`
+  );
   logger.info(`Server: ${config.server.endpoint}`);
 
   await trainer.run();
@@ -227,15 +157,16 @@ async function trainMode() {
 (async () => {
   console.log("");
   console.log("  ╔══════════════════════════════════════════════╗");
-  console.log("  ║  Chainer Agent — NEAT Neuroevolution Bots    ║");
-  console.log("  ║  Self-Learning AI for chainer.io Arena       ║");
+  console.log("  ║  Chainer Agent — Self-Improving Arena Bots   ║");
+  console.log("  ║  PPO Reflexes + Match-Boundary Strategy      ║");
   console.log("  ╚══════════════════════════════════════════════╝");
   console.log("");
 
   if (flags.testConnect) {
     await testConnect();
   } else if (flags.watch) {
-    await watchMode();
+    logger.error("--watch is no longer supported in the PPO supervisor runtime.");
+    process.exit(1);
   } else {
     await trainMode();
   }

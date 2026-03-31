@@ -12,6 +12,7 @@ class GameState {
     this.deserializer = new GameStateDeserializer();
     this.playerHealth = new Map(); // userID -> health
     this.playerData = new Map(); // userID -> full player state from room.state
+    this.battleCrystals = [];
   }
 
   /**
@@ -26,6 +27,7 @@ class GameState {
         z: state.z,
       });
     }
+    this.battleCrystals = snapshot.state.battleCrystals || [];
     return snapshot;
   }
 
@@ -120,10 +122,51 @@ class GameState {
     return this.playerHealth.get(userID) ?? 0;
   }
 
+  getClosestCrystal(position) {
+    if (!position || this.battleCrystals.length === 0) return null;
+    let closest = null;
+    let bestDistance = Infinity;
+
+    for (const crystal of this.battleCrystals) {
+      const dx = crystal.x - position.x;
+      const dy = (crystal.y || 0) - (position.y || 0);
+      const dz = crystal.z - position.z;
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        closest = { ...crystal, distance };
+      }
+    }
+
+    return closest;
+  }
+
+  getNearbyCrystalCount(position, range) {
+    if (!position || this.battleCrystals.length === 0) return 0;
+    let count = 0;
+    for (const crystal of this.battleCrystals) {
+      const dx = crystal.x - position.x;
+      const dy = (crystal.y || 0) - (position.y || 0);
+      const dz = crystal.z - position.z;
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (distance <= range) count += 1;
+    }
+    return count;
+  }
+
+  getLivePlayerCount() {
+    let alive = 0;
+    for (const health of this.playerHealth.values()) {
+      if (health > 0) alive += 1;
+    }
+    return alive;
+  }
+
   clear() {
     this.spatialGrid.clear();
     this.playerHealth.clear();
     this.playerData.clear();
+    this.battleCrystals = [];
   }
 }
 

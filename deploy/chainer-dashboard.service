@@ -1,0 +1,18 @@
+[Unit]
+Description=Chainer Agent - Operator Dashboard
+After=network.target chainer-trainer.service chainer-bots.service
+Requires=chainer-trainer.service chainer-bots.service
+
+[Service]
+Type=simple
+User=m
+WorkingDirectory=/home/m/chainer-agent
+EnvironmentFile=/home/m/chainer-agent/.env
+ExecStart=/usr/bin/node web/server.js
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/m/chainer-agent/dashboard.log
+StandardError=append:/home/m/chainer-agent/dashboard.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,129 +1,163 @@
 # Chainer Agent
 
-Self-learning AI bots for the [chainer.io](https://chainer.io) 3rd-person multiplayer shooter arena. Each agent has a unique personality, its own neural network, and an LLM strategic brain — they fight, learn, and evolve.
+Reliable self-improving bots for the chainer.io arena.
 
-## Architecture: Two-Layer Brain
+This repo now runs a supervised PPO bot swarm with:
 
-Each agent has **two brain layers** working together:
+- per-agent ONNX policies served by a Python trainer
+- match-boundary LLM strategy coaching
+- rostered model alias loading (`latest`, `candidate`, `champion`)
+- single-instance runtime locking
+- live operator telemetry for rooms, trainer health, joins, inputs, and failures
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    AGENT BRAIN                               │
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  LAYER 2: LLM Strategic Brain (kimi-k2.5)            │   │
-│  │  Runs: every 3 matches (between matches)             │   │
-│  │  Does: analyzes performance, adjusts strategy,        │   │
-│  │        formulates plans, reflects on mistakes         │   │
-│  │  Output: strategy parameters that OVERRIDE Layer 1    │   │
-│  └────────────────────────┬─────────────────────────────┘   │
-│                           │ strategy overrides               │
-│  ┌────────────────────────▼─────────────────────────────┐   │
-│  │  LAYER 1: Neural Network (PPO on GPU)                 │   │
-│  │  Runs: 60Hz (every frame)                             │   │
-│  │  Does: raw movement, aiming, shooting decisions       │   │
-│  │  Trained: continuously via PyTorch on GPU             │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-```
+## What Changed
 
-**Layer 1 (NN/PPO)** handles reflexes — frame-by-frame movement, aim, shoot. Trained on GPU via PyTorch, exported as ONNX models, inference in Node.js.
+The old NEAT-oriented control loop has been replaced by a production-oriented runtime:
 
-**Layer 2 (LLM)** handles strategy — it OVERRIDES the NN when needed. A Hunter will force-charge enemies even if the NN says retreat. A Collector will ignore fights to gather crystals. Strategy parameters directly control behavior:
+- `SwarmSupervisor` owns lifecycle, health checks, room scheduling, and telemetry
+- `RoomCoordinator` owns queueing, seat assignment tracking, joins, retries, and cleanup
+- `training/trainer.py` now exports models through a single-threaded ONNX queue into a filesystem model registry
+- the dashboard is now an operator console, not just a trainer stat page
 
-| Parameter | Low (0.0) | High (1.0) |
-|-----------|-----------|------------|
-| `aggression` | Run away from enemies | Always charge and shoot |
-| `accuracy_focus` | Spray bullets randomly | Only perfect aimed shots |
-| `crystal_priority` | Ignore crystals | Only collect crystals, avoid fights |
-| `ability_usage` | Never use abilities | Spam abilities constantly |
-| `retreat_threshold` | Fight to death (Berserker) | Retreat at 70% health (Survivor) |
-
-## Agent Personalities
-
-Each agent gets a deterministic personality archetype that creates **drastically different playstyles**:
-
-| Agent | Archetype | Behavior |
-|-------|-----------|----------|
-| agent_0, 8, 16 | **Hunter** | Charges enemies, close combat, never retreats |
-| agent_1, 9, 17 | **Sniper** | Keeps distance, precise shots only |
-| agent_2, 10, 18 | **Collector** | Avoids fights, hoards crystals for score |
-| agent_3, 11, 19 | **Survivor** | Retreats early, outlasts everyone |
-| agent_4, 12, 20 | **Berserker** | All-in maniac, zero self-preservation |
-| agent_5, 13, 21 | **Tactician** | Balanced, adapts to situation |
-| agent_6, 14, 22 | **Flanker** | Hit-and-run, attacks from edges |
-| agent_7, 15, 23 | **Guardian** | Holds center, punishes intruders |
-
-The LLM reviews performance every 3 matches and adjusts strategy — a Survivor might become more aggressive if it's not scoring enough, or a Hunter might learn to retreat when K/D drops.
-
-## How Training Works
+## Architecture
 
 ```
-                     ┌─── Game Server (Colyseus) ───┐
-                     │  Room 1: 12 agents fighting   │
-                     │  Room 2: 12 agents fighting   │
-                     └───────────┬───────────────────┘
-                                 │ experience (state, action, reward)
-                     ┌───────────▼───────────────────┐
-                     │  PyTorch Trainer (GPU)          │
-                     │  24 individual PPO networks     │
-                     │  → ONNX export after training   │
-                     └───────────┬───────────────────┘
-                                 │ ONNX models
-                     ┌───────────▼───────────────────┐
-                     │  Node.js Bot Swarm              │
-                     │  onnxruntime-node inference     │
-                     │  + LLM strategic overrides      │
-                     └───────────────────────────────┘
-                                 │
-              every 10 matches:  │  NATURAL SELECTION
-              ┌──────────────────▼──────────────────┐
-              │  Bottom 5 agents → deleted            │
-              │  Top 5 agents → cloned + mutated     │
-              │  (2% weight noise on clone)           │
-              └──────────────────────────────────────┘
+┌────────────────────────────┐
+│  Web Operator Console      │  port 3000
+│  /api/system /api/rooms    │
+└──────────────┬─────────────┘
+               │
+┌──────────────▼─────────────┐
+│  Swarm Supervisor          │  port 3101
+│  single-instance lock      │
+│  room telemetry + events   │
+│  one RoomCoordinator/room  │
+└──────────────┬─────────────┘
+               │
+┌──────────────▼─────────────┐
+│  Arena Backend             │
+│  queue / reservation / ws  │
+└──────────────┬─────────────┘
+               │
+┌──────────────▼─────────────┐
+│  PPO Trainer               │  port 5555
+│  per-agent registry        │
+│  aliases: latest/candidate │
+│  champion scaffolding      │
+└────────────────────────────┘
 ```
 
-1. **24 agents** play in 2 parallel rooms (12 per room)
-2. Each agent collects experience (state, action, reward) every frame
-3. Experience is sent to **PyTorch trainer on GPU** for PPO updates
-4. Updated models exported as ONNX and loaded by bots in real-time
-5. Every 3 matches, the **LLM** analyzes performance and adjusts strategy
-6. Every 10 matches, **natural selection**: weakest 5 die, strongest 5 cloned with mutations
-7. Runs **24/7** with auto-restart
+## Runtime Model
 
-## Tech Stack
+Each bot has two layers:
 
-| Component | Technology | Purpose |
-|-----------|-----------|---------|
-| NN Training | **PyTorch** (GPU, CUDA) | PPO per-agent policy networks |
-| NN Inference | **onnxruntime-node** | Fast ONNX inference in Node.js |
-| Strategic Brain | **kimi-k2.5** via Ollama Cloud | LLM strategy analysis + planning |
-| Game Client | **colyseus.js** v0.15 | WebSocket multiplayer (same as real players) |
-| Protocol | **protobufjs** | Binary movement/shoot messages |
-| Dashboard | **Express** + vanilla JS | Real-time web UI at port 3000 |
-| Deployment | **systemd** / auto-restart scripts | 24/7 operation |
+- Reflex layer: PPO policy exported to ONNX and executed locally with `onnxruntime-node`
+- Strategy layer: LLM runs every 3 matches, returns strict JSON, and updates bounded strategy parameters
+
+The LLM is not in the hot path. Live action decisions stay deterministic and low-latency.
+
+## Key Reliability Fixes
+
+- Single-instance lock at `/tmp/chainer-agent.lock`
+- Trainer readiness gate before the swarm starts matches
+- Per-bot seat assignment tracking instead of assuming one queue result applies to the whole room
+- Join failure classification for reserved-seat expiry and locked rooms
+- Room-local schema failure containment so bad state patches do not kill the whole swarm
+- Telemetry server with `/healthz`, `/readyz`, `/metrics`, `/system`, `/rooms`, `/events`
+
+## Model Registry
+
+Models are stored under:
+
+```text
+models/<agent_id>/versions/v000123/
+  policy.onnx
+  checkpoint.pt
+  metadata.json
+  eval.json
+models/<agent_id>/aliases.json
+```
+
+Alias support:
+
+- `latest`: newest exported policy
+- `candidate`: newest policy considered for promotion
+- `champion`: stable slot for curated/tournament play
+
+Bots can be rostered against aliases instead of raw versions.
+
+## State + Reward
+
+The policy input is now objective-aware. In addition to combat and scoreboard context, the state extractor includes:
+
+- nearest crystal direction and distance
+- local crowding
+- ability readiness ratio
+- recent combat context
+
+Rewards are shaped from:
+
+- score delta
+- kills / deaths
+- damage dealt / damage taken
+- survival
+- ability value
+- anti-suicide penalty
+
+Episode reward totals are persisted for debugging.
+
+## Project Structure
+
+```text
+src/
+  bot/
+    AgentBrain.js
+    SmartBot.js
+    StrategicBrain.js
+    StateExtractor.js
+  runtime/
+    SwarmSupervisor.js
+    RoomCoordinator.js
+    RuntimeState.js
+    SingleInstanceLock.js
+    Roster.js
+  game/
+  network/
+training/
+  trainer.py
+  requirements.txt
+web/
+  server.js
+  public/index.html
+config/
+  default.json
+  roster.json
+deploy/
+  chainer-trainer.service
+  chainer-bots.service
+  chainer-dashboard.service
+```
 
 ## Setup
 
 ### Prerequisites
 
-- **Node.js 18+**
-- **Python 3.10+** with PyTorch
-- A running chainer.io game server
-- Ollama Cloud API key (for LLM brain)
+- Node.js `20.20.0`
+- Python `3.12.3`
+
+Optional local version hints are checked in:
+
+- `.nvmrc`
+- `.python-version`
 
 ### Install
 
 ```bash
-git clone https://github.com/matveyco/chainer-agent.git
-cd chainer-agent
 npm install
 
-# Python training service
 python3 -m venv venv
 source venv/bin/activate
-pip install torch numpy onnx onnxscript flask
+pip install -r training/requirements.txt
 ```
 
 ### Configure
@@ -132,96 +166,156 @@ pip install torch numpy onnx onnxscript flask
 cp .env.example .env
 ```
 
-Edit `.env`:
+Important variables:
 
 ```env
-GAME_SERVER_URL=https://your-game-server.com
+GAME_SERVER_URL=https://ai-test-arena.chainers.io
 TRAINER_URL=http://localhost:5555
+SUPERVISOR_PORT=3101
+DASHBOARD_PORT=3000
+
 POPULATION_SIZE=12
 NUM_ROOMS=2
 MATCH_TIMEOUT=120000
 SELECTION_INTERVAL=10
 NUM_CULL=5
-OLLAMA_CLOUD_API_KEY=your-ollama-api-key
-DEEP_ANALYSIS_MODEL=kimi-k2.5:cloud
+
+BOT_ROSTER_PATH=config/roster.json
 NODE_TLS_REJECT_UNAUTHORIZED=0
 ```
 
-### Run
+LLM coaching:
+
+```env
+OLLAMA_CLOUD_API_KEY=...
+DEEP_ANALYSIS_MODEL=kimi-k2.5:cloud
+OAUTH_API_KEY=...
+```
+
+## Roster Configuration
+
+`config/roster.json` defines which agents load into which rooms and which alias each one should use.
+
+Example:
+
+```json
+{
+  "rooms": [
+    [
+      { "agentId": "agent_0", "modelAlias": "champion" },
+      { "agentId": "agent_1", "modelAlias": "latest" }
+    ]
+  ]
+}
+```
+
+This is the hook for future matches, showmatches, and championships.
+
+## Running
+
+### Local
+
+Terminal 1:
 
 ```bash
-# Option 1: 24/7 mode (manages all services)
-nohup bash deploy/run-forever.sh > runner.log 2>&1 &
-
-# Option 2: Manual (3 terminals)
-source venv/bin/activate && python training/trainer.py   # Terminal 1: GPU trainer
-node src/index.js                                         # Terminal 2: Bot swarm
-node web/server.js                                        # Terminal 3: Dashboard
+source venv/bin/activate
+python training/trainer.py
 ```
+
+Terminal 2:
+
+```bash
+node src/index.js
+```
+
+Terminal 3:
+
+```bash
+node web/server.js
+```
+
+### Production
+
+Install the systemd services on `spark.local`:
+
+```bash
+bash deploy/setup.sh
+```
+
+Services:
+
+- `chainer-trainer`
+- `chainer-bots`
+- `chainer-dashboard`
+
+`deploy/run-forever.sh` is kept only as a deprecated local helper and should not be the production control plane.
+
+## Operator APIs
+
+### Supervisor
+
+- `GET /healthz`
+- `GET /readyz`
+- `GET /metrics`
+- `GET /system`
+- `GET /rooms`
+- `GET /events`
+
+### Trainer
+
+- `GET /healthz`
+- `GET /readyz`
+- `GET /metrics`
+- `GET /stats`
+- `POST /experience`
+- `POST /episode`
+- `GET /model/:agent_id?alias=latest`
+- `GET /model/:agent_id/version?alias=latest`
+- `GET /model/:agent_id/metadata?alias=latest`
+- `GET /model/:agent_id/aliases`
+- `POST /model/:agent_id/alias/:alias`
+- `POST /select`
+- `POST /agent/:id/reset`
+- `POST /agent/:target/clone/:source`
+- `GET /agent/:id/history`
+- `POST /agent/:id/strategy`
 
 ### Dashboard
 
-Open `http://your-server:3000` in a browser:
-- **Leaderboard** — all agents ranked by score, K/D, model version
-- **Agent Detail** — click any agent to see personality, strategy bars, LLM thoughts, score trends
-- **Controls** — trigger natural selection, clone agents, reset agents
+- `GET /healthz`
+- `GET /readyz`
+- `GET /metrics`
+- `GET /api/system`
+- `GET /api/rooms`
+- `GET /api/events`
+- `GET /api/stats`
+- `GET /api/profile/:id`
 
-## Project Structure
+## Testing
 
-```
-chainer-agent/
-├── src/
-│   ├── index.js                  # Entry point
-│   ├── bot/
-│   │   ├── SmartBot.js           # Bot with dual-brain architecture
-│   │   ├── AgentBrain.js         # ONNX inference (NN layer)
-│   │   ├── StrategicBrain.js     # LLM strategy (overrides NN)
-│   │   └── StateExtractor.js     # Game state → 18-dim input vector
-│   ├── evolution/
-│   │   ├── Trainer.js            # 24/7 training loop, 2 rooms, selection
-│   │   ├── Population.js         # NEAT population (legacy, kept for compat)
-│   │   └── Genome.js             # Model persistence
-│   ├── network/                  # Colyseus + protobuf + matchmaking
-│   ├── game/                     # SpatialGrid, state deserialization
-│   └── metrics/                  # Fitness tracking, generation logging
-├── training/
-│   └── trainer.py                # PyTorch PPO service (GPU)
-├── web/
-│   ├── server.js                 # Dashboard Express server
-│   └── public/index.html         # Dashboard UI
-├── deploy/
-│   └── run-forever.sh            # 24/7 runner with auto-restart
-├── config/default.json           # Default parameters
-└── .env.example                  # Environment config template
+Run the unit suite:
+
+```bash
+npm test
 ```
 
-## API Endpoints
+Run the smoke check against live/local services:
 
-### Python Trainer (port 5555)
+```bash
+npm run test:smoke
+```
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Service status + GPU info |
-| `/stats` | GET | All agent stats |
-| `/model/:id` | GET | Download ONNX model |
-| `/experience` | POST | Submit training experience |
-| `/select` | POST | Trigger natural selection |
-| `/agent/:id/reset` | POST | Reset agent to random |
-| `/agent/:id/clone/:src` | POST | Clone source → target |
-| `/agent/:id/history` | GET | Training log history |
+Current automated coverage includes:
 
-### Web Dashboard (port 3000)
+- single-instance lock behavior
+- room assignment grouping
+- join error classification
+- roster normalization
+- shaped reward recording
+- structured LLM strategy parsing
 
-Proxies to trainer API at `/api/*` and serves the dashboard UI.
+## Notes
 
-## References
-
-- [PPO (Schulman et al., 2017)](https://arxiv.org/abs/1707.06347) — Proximal Policy Optimization
-- [Karpathy's AutoResearch](https://github.com/karpathy/autoresearch) — Self-improving loops
-- [Colyseus](https://colyseus.io) — Multiplayer game framework
-- [ONNX Runtime](https://onnxruntime.ai) — Cross-platform ML inference
-- [chainer.io](https://chainer.io) — The game
-
-## License
-
-MIT
+- `--watch` and NEAT-era resume flows are deprecated in the supervised PPO runtime.
+- Existing old checkpoints with incompatible state dimensions are skipped on load.
+- The champion/evaluation ladder is scaffolded through model aliases and metadata, ready for stricter promotion workflows.

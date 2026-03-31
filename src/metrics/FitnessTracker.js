@@ -9,6 +9,7 @@ class FitnessTracker {
     this.deaths = 0;
     this.damageDealt = 0;
     this.damageTaken = 0;
+    this.abilitiesUsed = 0;
     this.shotsFired = 0;
     this.shotsHit = 0;
     this.survivalTime = 0;
@@ -40,6 +41,10 @@ class FitnessTracker {
 
   recordShot() {
     this.shotsFired++;
+  }
+
+  recordAbilityUse() {
+    this.abilitiesUsed++;
   }
 
   updateSurvival(dt) {
@@ -79,6 +84,7 @@ class FitnessTracker {
       deaths: this.deaths,
       damageDealt: Math.round(this.damageDealt),
       damageTaken: Math.round(this.damageTaken),
+      abilitiesUsed: this.abilitiesUsed,
       shotsFired: this.shotsFired,
       shotsHit: this.shotsHit,
       accuracy: Math.round(this.getAccuracy() * 100),

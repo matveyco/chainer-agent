@@ -1,7 +1,7 @@
 /**
  * Transforms raw game state into a normalized input vector for the neural network.
  *
- * 18 inputs (must match Python trainer STATE_DIM):
+ * 24 inputs (must match Python trainer STATE_DIM):
  *   0: own health (0-1)
  *   1: own X position (clamped ±1)
  *   2: own Z position (clamped ±1)
@@ -20,6 +20,12 @@
  *  15: own kills (normalized, /20)
  *  16: own deaths (normalized, /20)
  *  17: match time remaining (0-1)
+ *  18: distance to nearest crystal (0-1)
+ *  19: angle to nearest crystal (sin)
+ *  20: angle to nearest crystal (cos)
+ *  21: ability readiness ratio (0-1)
+ *  22: recent damage dealt (0-1)
+ *  23: recent damage taken (0-1)
  */
 
 const { clamp, getArrayLength } = require("../utils/math");
@@ -28,6 +34,7 @@ const INPUT_COUNT = 18;
 const ARENA_SIZE = 60;
 const MAX_HEALTH = 100;
 const MAX_SPEED = 7;
+const MAX_DAMAGE_WINDOW = 100;
 
 class StateExtractor {
   constructor() {
@@ -35,6 +42,8 @@ class StateExtractor {
     this.lastMoveX = 0;
     this.lastMoveZ = 0;
     this.matchTimeRemaining = 1.0;
+    this.recentDamageDealt = 0;
+    this.recentDamageTaken = 0;
   }
 
   static get INPUT_COUNT() {
@@ -48,6 +57,11 @@ class StateExtractor {
 
   setMatchTime(remaining, total) {
     this.matchTimeRemaining = total > 0 ? clamp(remaining / total, 0, 1) : 1;
+  }
+
+  setRecentCombat(damageDealt, damageTaken) {
+    this.recentDamageDealt = damageDealt || 0;
+    this.recentDamageTaken = damageTaken || 0;
   }
 
   /**
@@ -131,6 +145,35 @@ class StateExtractor {
 
     // Match time remaining
     v[17] = this.matchTimeRemaining;
+
+    // Crystal/objective awareness
+    const closestCrystal = gameState.getClosestCrystal(myPos);
+    if (closestCrystal) {
+      v[18] = clamp(closestCrystal.distance / ARENA_SIZE, 0, 1);
+      const cdx = closestCrystal.x - myPos.x;
+      const cdz = closestCrystal.z - myPos.z;
+      const cAngle = Math.atan2(cdz, cdx);
+      v[19] = Math.sin(cAngle);
+      v[20] = Math.cos(cAngle);
+    } else {
+      v[18] = 1.0;
+    }
+
+    // Ability readiness ratio
+    const abilities = playerData?.abilities;
+    if (abilities?.size) {
+      let ready = 0;
+      let total = 0;
+      for (const ability of abilities.values()) {
+        total += 1;
+        if (ability?.ready) ready += 1;
+      }
+      v[21] = total > 0 ? clamp(ready / total, 0, 1) : 0;
+    }
+
+    // Recent combat context
+    v[22] = clamp(this.recentDamageDealt / MAX_DAMAGE_WINDOW, 0, 1);
+    v[23] = clamp(this.recentDamageTaken / MAX_DAMAGE_WINDOW, 0, 1);
 
     return v;
   }

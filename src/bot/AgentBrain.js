@@ -4,35 +4,40 @@
  * Collects experience tuples and sends them back for PPO training.
  */
 
-const fs = require("fs");
-const path = require("path");
 const logger = require("../utils/logger");
 
-// State dimensions must match Python trainer
-const STATE_DIM = 18;
+// State dimensions must match Python trainer.
+const STATE_DIM = 24;
 const ACTION_DIM = 6;
 
 class AgentBrain {
   /**
-   * @param {string} agentId — persistent agent identity
-   * @param {string} trainerUrl — URL of Python training service
+   * @param {string} agentId
+   * @param {string} trainerUrl
+   * @param {Object} options
    */
-  constructor(agentId, trainerUrl) {
+  constructor(agentId, trainerUrl, options = {}) {
     this.agentId = agentId;
     this.trainerUrl = trainerUrl;
+    this.modelAlias = options.modelAlias || "latest";
+    this.rewardConfig = options.rewardConfig || {};
+    this.reporter = options.reporter || null;
     this.session = null;
     this.ort = null;
     this.modelVersion = 0;
+    this.metadata = null;
     this.experienceBuffer = [];
+    this.episodeRewardTotals = {};
     this.lastState = null;
     this.lastAction = null;
     this.lastScore = 0;
+    this.lastKills = 0;
+    this.lastDeaths = 0;
     this.ready = false;
+    this.loadingPromise = null;
+    this.nextLoadAttemptAt = 0;
   }
 
-  /**
-   * Load ONNX model from training service.
-   */
   async init() {
     try {
       this.ort = require("onnxruntime-node");
@@ -42,55 +47,29 @@ class AgentBrain {
       return;
     }
 
-    await this._loadModel();
+    await this._loadModel(true);
   }
 
-  async _loadModel() {
-    try {
-      // Fetch ONNX model from trainer
-      const res = await fetch(`${this.trainerUrl}/model/${this.agentId}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      const buffer = await res.arrayBuffer();
-      const modelData = new Uint8Array(buffer);
-
-      // Load into ONNX Runtime
-      this.session = await this.ort.InferenceSession.create(Buffer.from(modelData));
-      this.ready = true;
-
-      // Check version
-      const verRes = await fetch(`${this.trainerUrl}/model/${this.agentId}/version`);
-      const verData = await verRes.json();
-      this.modelVersion = verData.version || 0;
-
-      logger.debug(`Agent ${this.agentId}: loaded model v${this.modelVersion}`);
-    } catch (err) {
-      logger.warn(`Agent ${this.agentId}: model load failed: ${err.message}`);
-      this.ready = false;
-    }
-  }
-
-  /**
-   * Run inference: state vector → action vector.
-   * @param {Float32Array} stateVector — 18-element normalized state
-   * @returns {Object} action decisions
-   */
   async decide(stateVector) {
-    // Validate state — no NaN/Inf
     const stateArr = Array.from(stateVector);
     for (let i = 0; i < stateArr.length; i++) {
       if (!Number.isFinite(stateArr[i])) stateArr[i] = 0;
     }
     this.lastState = stateArr;
 
-    let actionValues;
+    if (!this.ready && Date.now() >= this.nextLoadAttemptAt) {
+      this._loadModel().catch(() => {});
+    }
 
+    let actionValues;
     if (this.ready && this.session) {
       try {
         const tensor = new this.ort.Tensor("float32", stateVector, [1, STATE_DIM]);
         const results = await this.session.run({ state: tensor });
         actionValues = Array.from(results.action.data);
-      } catch {
+      } catch (err) {
+        this.ready = false;
+        this._reportModelFailure(err);
         actionValues = this._randomAction();
       }
     } else {
@@ -99,65 +78,65 @@ class AgentBrain {
 
     this.lastAction = actionValues;
 
-    // Map action vector to game decisions
-    // Actions are tanh-bounded [-1, 1] from the network
     return {
       moveX: actionValues[0],
       moveZ: actionValues[1],
-      aimOffsetX: actionValues[2] * 3, // Scale to ±3 units
+      aimOffsetX: actionValues[2] * 3,
       aimOffsetZ: actionValues[3] * 3,
-      shouldShoot: actionValues[4] > 0, // Threshold at 0
+      shouldShoot: actionValues[4] > 0,
       shouldUseAbility: actionValues[5] > 0,
     };
   }
 
-  /**
-   * Record a reward step. Called after each game tick where we have new info.
-   * @param {number} currentScore — game's actual score
-   * @param {number} kills — total kills
-   * @param {number} deaths — total deaths
-   * @param {boolean} died — did we just die this tick?
-   * @param {boolean} gotKill — did we get a kill this tick?
-   * @param {number} damageDealt — damage dealt this tick
-   * @param {boolean} done — match ended?
-   */
-  recordStep(currentScore, kills, deaths, died, gotKill, damageDealt, done) {
+  recordStep(...args) {
+    const transition = this._normalizeTransitionArgs(args);
     if (!this.lastState || !this.lastAction) return;
 
-    // Reward = score delta + kill bonus - death penalty
-    const scoreDelta = currentScore - this.lastScore;
-    let reward = scoreDelta * 0.01; // Normalize score to reasonable range
+    const scoreDelta = transition.currentScore - this.lastScore;
+    const killDelta = Math.max(0, transition.kills - this.lastKills);
+    const deathDelta = Math.max(0, transition.deaths - this.lastDeaths);
 
-    if (gotKill) reward += 1.0;
-    if (died) reward -= 0.5;
-    if (damageDealt > 0) reward += damageDealt * 0.005;
+    const rewardComponents = {
+      scoreDelta: scoreDelta * (this.rewardConfig.scoreDeltaWeight ?? 0.02),
+      kills: (transition.gotKill ? 1 : killDelta) * (this.rewardConfig.killBonus ?? 1.0),
+      deaths: (transition.died ? 1 : deathDelta) * (this.rewardConfig.deathPenalty ?? -0.75),
+      damage: transition.damageDealt * (this.rewardConfig.damageWeight ?? 0.004),
+      damageTaken: transition.damageTaken * (this.rewardConfig.damageTakenPenalty ?? -0.002),
+      survival: transition.survivalSeconds * (this.rewardConfig.survivalWeight ?? 0.01),
+      ability: transition.abilityUsed ? (this.rewardConfig.abilityValueWeight ?? 0.08) : 0,
+      accuracy: transition.shotAccuracy * (this.rewardConfig.accuracyWeight ?? 0.2),
+      antiSuicide: transition.died && !transition.gotKill ? (this.rewardConfig.antiSuicidePenalty ?? -0.3) : 0,
+    };
 
-    this.lastScore = currentScore;
+    const reward = Object.values(rewardComponents).reduce((sum, value) => sum + value, 0);
+
+    this.lastScore = transition.currentScore;
+    this.lastKills = transition.kills;
+    this.lastDeaths = transition.deaths;
+
+    for (const [key, value] of Object.entries(rewardComponents)) {
+      this.episodeRewardTotals[key] = (this.episodeRewardTotals[key] || 0) + value;
+    }
 
     this.experienceBuffer.push({
       state: this.lastState,
       action: this.lastAction,
       reward,
-      done,
-      score: currentScore,
-      kills,
-      deaths,
+      reward_components: rewardComponents,
+      done: transition.done,
+      score: transition.currentScore,
+      kills: transition.kills,
+      deaths: transition.deaths,
     });
   }
 
-  /**
-   * Send collected experience to training service.
-   * Call this periodically or at end of match.
-   */
   async flush() {
     if (this.experienceBuffer.length === 0) return;
 
-    // Filter out any experiences with invalid data
-    this.experienceBuffer = this.experienceBuffer.filter((e) => {
-      if (!e.state || !e.action) return false;
-      return e.state.every(Number.isFinite) && e.action.every(Number.isFinite);
+    this.experienceBuffer = this.experienceBuffer.filter((entry) => {
+      if (!entry.state || !entry.action) return false;
+      return entry.state.every(Number.isFinite) && entry.action.every(Number.isFinite);
     });
-
     if (this.experienceBuffer.length === 0) return;
 
     try {
@@ -166,15 +145,17 @@ class AgentBrain {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           agent_id: this.agentId,
+          model_alias: this.modelAlias,
           transitions: this.experienceBuffer,
         }),
       });
 
       if (res.ok) {
         const data = await res.json();
-        // Reload model if new version available
+        this.reporter?.incrementCounter("experienceFlushes");
+        this.reporter?.observe("experienceFlushSizeAvg", this.experienceBuffer.length);
         if (data.model_version > this.modelVersion) {
-          await this._loadModel();
+          await this._loadModel(true);
         }
       }
     } catch (err) {
@@ -184,35 +165,131 @@ class AgentBrain {
     this.experienceBuffer = [];
   }
 
-  /**
-   * Report end-of-match stats.
-   */
-  async reportEpisode(score, kills, deaths) {
+  async reportEpisode(summary) {
+    const payload = typeof summary === "object"
+      ? summary
+      : { score: summary, kills: arguments[1], deaths: arguments[2] };
+
     try {
       await fetch(`${this.trainerUrl}/episode`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           agent_id: this.agentId,
-          score,
-          kills,
-          deaths,
+          model_alias: this.modelAlias,
+          reward_totals: this.episodeRewardTotals,
+          ...payload,
         }),
       });
     } catch {}
+  }
+
+  async reportStrategy(strategyPayload) {
+    try {
+      await fetch(`${this.trainerUrl}/agent/${this.agentId}/strategy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(strategyPayload),
+      });
+    } catch {}
+  }
+
+  resetMatch() {
+    this.lastScore = 0;
+    this.lastKills = 0;
+    this.lastDeaths = 0;
+    this.lastState = null;
+    this.lastAction = null;
+    this.episodeRewardTotals = {};
+  }
+
+  async _loadModel(force = false) {
+    if (!force && Date.now() < this.nextLoadAttemptAt) return;
+    if (this.loadingPromise) return this.loadingPromise;
+
+    this.loadingPromise = (async () => {
+      try {
+        const url = new URL(`${this.trainerUrl}/model/${this.agentId}`);
+        url.searchParams.set("alias", this.modelAlias);
+
+        const startedAt = Date.now();
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const buffer = await res.arrayBuffer();
+        const modelData = new Uint8Array(buffer);
+        this.session = await this.ort.InferenceSession.create(Buffer.from(modelData));
+        this.ready = true;
+
+        const metadataUrl = new URL(`${this.trainerUrl}/model/${this.agentId}/metadata`);
+        metadataUrl.searchParams.set("alias", this.modelAlias);
+        const metadataRes = await fetch(metadataUrl).catch(() => null);
+        if (metadataRes?.ok) {
+          this.metadata = await metadataRes.json();
+          this.modelVersion = this.metadata.model_version || 0;
+        } else {
+          const versionUrl = new URL(`${this.trainerUrl}/model/${this.agentId}/version`);
+          versionUrl.searchParams.set("alias", this.modelAlias);
+          const versionRes = await fetch(versionUrl);
+          const versionData = await versionRes.json();
+          this.modelVersion = versionData.version || 0;
+        }
+
+        const latency = Date.now() - startedAt;
+        this.reporter?.incrementCounter("modelFetches");
+        this.reporter?.observe("modelFetchLatencyMsAvg", latency);
+        logger.debug(`Agent ${this.agentId}: loaded ${this.modelAlias} v${this.modelVersion}`);
+      } catch (err) {
+        this.ready = false;
+        this._reportModelFailure(err);
+      } finally {
+        this.loadingPromise = null;
+      }
+    })();
+
+    return this.loadingPromise;
+  }
+
+  _normalizeTransitionArgs(args) {
+    if (args.length === 1 && typeof args[0] === "object") {
+      return {
+        currentScore: args[0].currentScore || 0,
+        kills: args[0].kills || 0,
+        deaths: args[0].deaths || 0,
+        died: !!args[0].died,
+        gotKill: !!args[0].gotKill,
+        damageDealt: args[0].damageDealt || 0,
+        damageTaken: args[0].damageTaken || 0,
+        survivalSeconds: args[0].survivalSeconds || 0,
+        abilityUsed: !!args[0].abilityUsed,
+        shotAccuracy: args[0].shotAccuracy || 0,
+        done: !!args[0].done,
+      };
+    }
+
+    return {
+      currentScore: args[0] || 0,
+      kills: args[1] || 0,
+      deaths: args[2] || 0,
+      died: !!args[3],
+      gotKill: !!args[4],
+      damageDealt: args[5] || 0,
+      damageTaken: 0,
+      survivalSeconds: 0,
+      abilityUsed: false,
+      shotAccuracy: 0,
+      done: !!args[6],
+    };
   }
 
   _randomAction() {
     return Array.from({ length: ACTION_DIM }, () => Math.random() * 2 - 1);
   }
 
-  /**
-   * Reset score tracking for new match.
-   */
-  resetMatch() {
-    this.lastScore = 0;
-    this.lastState = null;
-    this.lastAction = null;
+  _reportModelFailure(err) {
+    this.nextLoadAttemptAt = Date.now() + 10000;
+    this.reporter?.incrementCounter("modelFetchFailures");
+    logger.warn(`Agent ${this.agentId}: model load failed: ${err.message}`);
   }
 }
 

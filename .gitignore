@@ -4,3 +4,5 @@ temp_server_repo/
 .DS_Store
 .env
 *.log
+__pycache__/
+*.pyc

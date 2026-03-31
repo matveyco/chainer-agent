@@ -1,0 +1,32 @@
+{
+  "rooms": [
+    [
+      { "agentId": "agent_0", "displayName": "agent_0", "modelAlias": "latest" },
+      { "agentId": "agent_1", "displayName": "agent_1", "modelAlias": "latest" },
+      { "agentId": "agent_2", "displayName": "agent_2", "modelAlias": "latest" },
+      { "agentId": "agent_3", "displayName": "agent_3", "modelAlias": "latest" },
+      { "agentId": "agent_4", "displayName": "agent_4", "modelAlias": "latest" },
+      { "agentId": "agent_5", "displayName": "agent_5", "modelAlias": "latest" },
+      { "agentId": "agent_6", "displayName": "agent_6", "modelAlias": "latest" },
+      { "agentId": "agent_7", "displayName": "agent_7", "modelAlias": "latest" },
+      { "agentId": "agent_8", "displayName": "agent_8", "modelAlias": "latest" },
+      { "agentId": "agent_9", "displayName": "agent_9", "modelAlias": "latest" },
+      { "agentId": "agent_10", "displayName": "agent_10", "modelAlias": "latest" },
+      { "agentId": "agent_11", "displayName": "agent_11", "modelAlias": "latest" }
+    ],
+    [
+      { "agentId": "agent_12", "displayName": "agent_12", "modelAlias": "latest" },
+      { "agentId": "agent_13", "displayName": "agent_13", "modelAlias": "latest" },
+      { "agentId": "agent_14", "displayName": "agent_14", "modelAlias": "latest" },
+      { "agentId": "agent_15", "displayName": "agent_15", "modelAlias": "latest" },
+      { "agentId": "agent_16", "displayName": "agent_16", "modelAlias": "latest" },
+      { "agentId": "agent_17", "displayName": "agent_17", "modelAlias": "latest" },
+      { "agentId": "agent_18", "displayName": "agent_18", "modelAlias": "latest" },
+      { "agentId": "agent_19", "displayName": "agent_19", "modelAlias": "latest" },
+      { "agentId": "agent_20", "displayName": "agent_20", "modelAlias": "latest" },
+      { "agentId": "agent_21", "displayName": "agent_21", "modelAlias": "latest" },
+      { "agentId": "agent_22", "displayName": "agent_22", "modelAlias": "latest" },
+      { "agentId": "agent_23", "displayName": "agent_23", "modelAlias": "latest" }
+    ]
+  ]
+}

@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=m
 WorkingDirectory=/home/m/chainer-agent
+EnvironmentFile=/home/m/chainer-agent/.env
 Environment=TRAINER_PORT=5555
 ExecStart=/home/m/chainer-agent/venv/bin/python3 training/trainer.py
 Restart=always

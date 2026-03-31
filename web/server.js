@@ -1,39 +1,117 @@
 /**
- * Chainer Agent — Web Dashboard Server
- *
- * Express server that:
- * - Serves the dashboard UI (static files)
- * - Proxies API calls to the Python trainer service
- * - Provides system-level endpoints
+ * Chainer Agent — Operator Dashboard Server
  */
 
 require("dotenv").config({ path: require("path").join(__dirname, "../.env") });
 
 const express = require("express");
-const path = require("path");
 const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
 const TRAINER_URL = process.env.TRAINER_URL || "http://localhost:5555";
-const PORT = parseInt(process.env.DASHBOARD_PORT || "3000");
+const SUPERVISOR_URL = process.env.SUPERVISOR_URL || `http://localhost:${process.env.SUPERVISOR_PORT || 3101}`;
+const PORT = parseInt(process.env.DASHBOARD_PORT || "3000", 10);
+const RUNTIME_STATE_FILE = path.join(__dirname, "../data/runtime_state.json");
 
-// Proxy helper
-async function trainerFetch(endpoint, options = {}) {
-  const res = await fetch(`${TRAINER_URL}${endpoint}`, {
+async function fetchJSON(baseUrl, endpoint, options = {}) {
+  const res = await fetch(`${baseUrl}${endpoint}`, {
     ...options,
     headers: { "Content-Type": "application/json", ...options.headers },
   });
-  return res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || `${baseUrl}${endpoint} -> ${res.status}`);
+    err.status = res.status;
+    err.payload = data;
+    throw err;
+  }
+  return data;
 }
 
-// ── API Routes ──
+async function fetchText(baseUrl, endpoint) {
+  const res = await fetch(`${baseUrl}${endpoint}`);
+  if (!res.ok) {
+    throw new Error(`${baseUrl}${endpoint} -> ${res.status}`);
+  }
+  return res.text();
+}
+
+function readRuntimeSnapshot() {
+  try {
+    if (fs.existsSync(RUNTIME_STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(RUNTIME_STATE_FILE, "utf-8"));
+    }
+  } catch {}
+  return null;
+}
+
+async function supervisorOrSnapshot(endpoint, fallbackSelector = null) {
+  try {
+    return await fetchJSON(SUPERVISOR_URL, endpoint);
+  } catch (err) {
+    const snapshot = readRuntimeSnapshot();
+    if (snapshot && fallbackSelector) {
+      return fallbackSelector(snapshot);
+    }
+    throw err;
+  }
+}
+
+app.get("/healthz", async (req, res) => {
+  try {
+    const [trainer, supervisor] = await Promise.all([
+      fetchJSON(TRAINER_URL, "/healthz"),
+      supervisorOrSnapshot("/healthz", (snapshot) => ({
+        ok: snapshot.status !== "stopped",
+        status: snapshot.status,
+        run_id: snapshot.runId,
+      })),
+    ]);
+    res.json({ ok: true, trainer, supervisor });
+  } catch (err) {
+    res.status(503).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/readyz", async (req, res) => {
+  const results = await Promise.allSettled([
+    fetchJSON(TRAINER_URL, "/readyz"),
+    supervisorOrSnapshot("/readyz", (snapshot) => ({
+      ok: snapshot?.trainer?.ready ?? false,
+      trainer: snapshot?.trainer || {},
+    })),
+  ]);
+
+  const ready = results.every((result) => result.status === "fulfilled" && result.value.ok !== false);
+  res.status(ready ? 200 : 503).json({
+    ok: ready,
+    trainer: results[0].status === "fulfilled" ? results[0].value : { error: results[0].reason.message },
+    supervisor: results[1].status === "fulfilled" ? results[1].value : { error: results[1].reason.message },
+  });
+});
+
+app.get("/metrics", async (req, res) => {
+  const parts = [];
+  try {
+    parts.push(await fetchText(TRAINER_URL, "/metrics"));
+  } catch {
+    parts.push("# trainer metrics unavailable\n");
+  }
+  try {
+    parts.push(await fetchText(SUPERVISOR_URL, "/metrics"));
+  } catch {
+    parts.push("# supervisor metrics unavailable\n");
+  }
+  res.type("text/plain").send(parts.join("\n"));
+});
 
 app.get("/api/stats", async (req, res) => {
   try {
-    const data = await trainerFetch("/stats");
+    const data = await fetchJSON(TRAINER_URL, "/stats");
     res.json(data);
   } catch (err) {
     res.status(503).json({ error: "Trainer unreachable", message: err.message });
@@ -42,16 +120,80 @@ app.get("/api/stats", async (req, res) => {
 
 app.get("/api/health", async (req, res) => {
   try {
-    const data = await trainerFetch("/health");
-    res.json(data);
+    const [trainer, supervisor] = await Promise.all([
+      fetchJSON(TRAINER_URL, "/healthz"),
+      supervisorOrSnapshot("/system", (snapshot) => snapshot),
+    ]);
+    res.json({ trainer, supervisor });
   } catch (err) {
-    res.status(503).json({ error: "Trainer unreachable" });
+    res.status(503).json({ error: "Services unreachable", message: err.message });
+  }
+});
+
+app.get("/api/system", async (req, res) => {
+  try {
+    const [stats, runtime] = await Promise.all([
+      fetchJSON(TRAINER_URL, "/stats"),
+      supervisorOrSnapshot("/system", (snapshot) => ({
+        runId: snapshot.runId,
+        pid: snapshot.pid,
+        startedAt: snapshot.startedAt,
+        status: snapshot.status,
+        config: snapshot.config,
+        supervisor: snapshot.supervisor,
+        trainer: snapshot.trainer,
+        counters: snapshot.counters,
+        observations: snapshot.observations,
+      })),
+    ]);
+    res.json({ runtime, trainer: stats });
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
+app.get("/api/rooms", async (req, res) => {
+  try {
+    const rooms = await supervisorOrSnapshot("/rooms", (snapshot) => snapshot.rooms || []);
+    res.json(rooms);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
+app.get("/api/events", async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || "100", 10)));
+    const events = await supervisorOrSnapshot(`/events?limit=${limit}`, (snapshot) => snapshot.events || []);
+    res.json(events);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
+app.get("/api/model/:id/aliases", async (req, res) => {
+  try {
+    const aliases = await fetchJSON(TRAINER_URL, `/model/${req.params.id}/aliases`);
+    res.json(aliases);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
+app.get("/api/model/:id/metadata", async (req, res) => {
+  try {
+    const query = new URLSearchParams(req.query).toString();
+    const suffix = query ? `?${query}` : "";
+    const metadata = await fetchJSON(TRAINER_URL, `/model/${req.params.id}/metadata${suffix}`);
+    res.json(metadata);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
   }
 });
 
 app.get("/api/agent/:id/history", async (req, res) => {
   try {
-    const data = await trainerFetch(`/agent/${req.params.id}/history`);
+    const data = await fetchJSON(TRAINER_URL, `/agent/${req.params.id}/history`);
     res.json(data);
   } catch (err) {
     res.status(503).json({ error: err.message });
@@ -60,7 +202,7 @@ app.get("/api/agent/:id/history", async (req, res) => {
 
 app.post("/api/select", async (req, res) => {
   try {
-    const data = await trainerFetch("/select", {
+    const data = await fetchJSON(TRAINER_URL, "/select", {
       method: "POST",
       body: JSON.stringify(req.body || {}),
     });
@@ -72,7 +214,7 @@ app.post("/api/select", async (req, res) => {
 
 app.post("/api/agent/:id/reset", async (req, res) => {
   try {
-    const data = await trainerFetch(`/agent/${req.params.id}/reset`, { method: "POST" });
+    const data = await fetchJSON(TRAINER_URL, `/agent/${req.params.id}/reset`, { method: "POST" });
     res.json(data);
   } catch (err) {
     res.status(503).json({ error: err.message });
@@ -81,7 +223,7 @@ app.post("/api/agent/:id/reset", async (req, res) => {
 
 app.post("/api/agent/:target/clone/:source", async (req, res) => {
   try {
-    const data = await trainerFetch(`/agent/${req.params.target}/clone/${req.params.source}`, {
+    const data = await fetchJSON(TRAINER_URL, `/agent/${req.params.target}/clone/${req.params.source}`, {
       method: "POST",
       body: JSON.stringify(req.body || {}),
     });
@@ -91,19 +233,14 @@ app.post("/api/agent/:target/clone/:source", async (req, res) => {
   }
 });
 
-// Agent profiles (from strategic brain data)
 app.get("/api/profiles", (req, res) => {
   try {
     const profilePath = path.join(__dirname, "../data/agent_profiles.json");
     if (fs.existsSync(profilePath)) {
-      const profiles = JSON.parse(fs.readFileSync(profilePath, "utf-8"));
-      res.json(profiles);
-    } else {
-      res.json({});
+      return res.json(JSON.parse(fs.readFileSync(profilePath, "utf-8")));
     }
-  } catch (err) {
-    res.json({});
-  }
+  } catch {}
+  return res.json({});
 });
 
 app.get("/api/profile/:id", (req, res) => {
@@ -111,16 +248,14 @@ app.get("/api/profile/:id", (req, res) => {
     const profilePath = path.join(__dirname, "../data/agent_profiles.json");
     if (fs.existsSync(profilePath)) {
       const profiles = JSON.parse(fs.readFileSync(profilePath, "utf-8"));
-      res.json(profiles[req.params.id] || { error: "Not found" });
-    } else {
-      res.json({ error: "No profiles yet" });
+      return res.json(profiles[req.params.id] || { error: "Not found" });
     }
   } catch (err) {
-    res.json({ error: err.message });
+    return res.json({ error: err.message });
   }
+  return res.json({ error: "No profiles yet" });
 });
 
-// Fallback to index.html for SPA
 app.get("/{*path}", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
@@ -128,4 +263,5 @@ app.get("/{*path}", (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[Dashboard] http://0.0.0.0:${PORT}`);
   console.log(`[Dashboard] Trainer: ${TRAINER_URL}`);
+  console.log(`[Dashboard] Supervisor: ${SUPERVISOR_URL}`);
 });

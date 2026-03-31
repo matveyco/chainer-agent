@@ -1,43 +1,45 @@
 /**
  * Smart bot with per-agent ONNX inference brain.
- *
- * Each bot has a persistent agent identity. The neural network is loaded
- * from the Python training service and runs via onnxruntime-node.
- * Experience (state, action, reward) is sent back for PPO training.
  */
 
 const { AgentBrain } = require("./AgentBrain");
 const { StrategicBrain } = require("./StrategicBrain");
 const { StateExtractor } = require("./StateExtractor");
 const { FitnessTracker } = require("../metrics/FitnessTracker");
-const { encodeInput, encodeShoot, generateID } = require("../network/Protocol");
+const { encodeInput, encodeShoot } = require("../network/Protocol");
 const { rand, getArrayLength, getDirectionArray } = require("../utils/math");
 
 const INPUT_BUFFER_SIZE = 16;
 const ABILITIES = Object.freeze(["rampage", "jump", "minePlanting"]);
 
 class SmartBot {
-  constructor(userID, _unused, config, agentId) {
+  constructor(userID, _unused, config, agentId, options = {}) {
     this.userID = userID;
     this.agentId = agentId || userID;
+    this.displayName = options.displayName || this.agentId;
+    this.modelAlias = options.modelAlias || config.training?.defaultModelAlias || "latest";
+    this.reporter = options.reporter || null;
     this.config = config;
     this.mapName = config.server.mapName;
     this.weaponType = config.server.weaponType;
 
-    // Brains: NN for reflexes, LLM for strategy
     this.brain = null;
     this.strategicBrain = null;
     if (config.ollamaApiKey) {
       this.strategicBrain = new StrategicBrain(
-        agentId,
+        this.agentId,
         config.ollamaApiKey,
-        config.ollamaModel || "kimi-k2.5:cloud"
+        config.ollamaModel || "kimi-k2.5:cloud",
+        {
+          trainerUrl: config.trainerUrl,
+          reporter: options.reporter || null,
+        }
       );
     }
+
     this.stateExtractor = new StateExtractor();
     this.fitness = new FitnessTracker();
 
-    // Connection state (set by Trainer)
     this.room = null;
     this.gameState = null;
     this.data = null;
@@ -45,7 +47,6 @@ class SmartBot {
     this.alive = true;
     this.matchEnded = false;
 
-    // Input buffer
     this.inputBuffer = new Array(INPUT_BUFFER_SIZE);
     for (let i = 0; i < INPUT_BUFFER_SIZE; i++) {
       this.inputBuffer[i] = {
@@ -58,36 +59,39 @@ class SmartBot {
     this.inputIndex = 0;
     this.lastInputIndex = 0;
 
-    // Timers
     this.coolDownTimer = 0;
     this.abilityTimer = rand(5, 15);
     this.searchClosestTimer = 0;
     this.rttTimer = 0;
-    this.experienceTimer = 0; // Send experience every N seconds
 
-    // State
     this.closestEnemy = null;
+    this.closestCrystal = null;
     this.lastMoveX = 0;
     this.lastMoveZ = 0;
     this.positionArray = [0, 0, 0];
     this.positionVector = { x: 0, y: 0, z: 0 };
+    this.decisionInFlight = false;
+    this.lastAbilityUsed = false;
 
-    // Per-tick reward tracking (reset each tick)
     this._lastGotKill = false;
     this._lastDied = false;
     this._lastDamageDealt = 0;
+    this._lastDamageTaken = 0;
     this._tickCounter = 0;
+    this._stateUpdatesSeen = 0;
+    this._inputsSent = 0;
   }
 
   async initBrain(trainerUrl) {
-    this.brain = new AgentBrain(this.agentId, trainerUrl);
+    this.brain = new AgentBrain(this.agentId, trainerUrl, {
+      modelAlias: this.modelAlias,
+      rewardConfig: this.config.reward,
+      reporter: this.reporter,
+    });
     await this.brain.init();
     this.brain.resetMatch();
   }
 
-  /**
-   * Main update loop — called at 60Hz by Trainer.
-   */
   update(dt) {
     if (!this.connected || !this.data || this.matchEnded) return;
     if (!this.alive || this.data.health === 0) {
@@ -96,9 +100,8 @@ class SmartBot {
     }
 
     this.fitness.updateSurvival(dt);
-    this._tickCounter++;
+    this._tickCounter += 1;
 
-    // Update position
     const myPos = this.gameState.getPosition(this.userID);
     if (myPos) {
       this.positionArray[0] = this.positionVector.x = myPos.x;
@@ -109,7 +112,6 @@ class SmartBot {
     const input = this.inputBuffer[this.inputIndex];
     if (!input) return;
 
-    // Timers
     if (this.coolDownTimer > 0) this.coolDownTimer -= dt;
     if (this.abilityTimer > 0) this.abilityTimer -= dt;
     if (this.searchClosestTimer > 0) this.searchClosestTimer -= dt;
@@ -117,9 +119,9 @@ class SmartBot {
 
     const weaponRange = this.data.weaponTargetDistance || 20;
 
-    // Search for enemies
     if (this.searchClosestTimer <= 0) {
       this.closestEnemy = this.gameState.getClosestEnemy(this.userID, weaponRange);
+      this.closestCrystal = this.gameState.getClosestCrystal(this.positionVector);
       this.searchClosestTimer = 0.5;
       if (this.rttTimer <= 0) {
         this.room.send("room:rtt");
@@ -127,36 +129,50 @@ class SmartBot {
       }
     }
 
-    // Get neural network decision (every 3rd tick for performance)
-    if (this._tickCounter % 3 === 0 && this.brain) {
+    if (
+      this._tickCounter % (this.config.bot.decisionIntervalTicks || 3) === 0 &&
+      this.brain &&
+      !this.decisionInFlight
+    ) {
       this.stateExtractor.setLastMove(this.lastMoveX, this.lastMoveZ);
+      this.stateExtractor.setRecentCombat(this._lastDamageDealt, this._lastDamageTaken);
       const stateVector = this.stateExtractor.extract(
-        this.gameState, this.userID, weaponRange,
-        this.coolDownTimer > 0, this.data
+        this.gameState,
+        this.userID,
+        weaponRange,
+        this.coolDownTimer > 0,
+        this.data
       );
 
-      // Synchronous-style: decide returns a promise but we handle it
-      this.brain.decide(stateVector).then((decision) => {
-        this._applyDecision(decision);
-      }).catch(() => {});
+      this.decisionInFlight = true;
+      this.brain.decide(stateVector)
+        .then((decision) => this._applyDecision(decision))
+        .catch(() => {})
+        .finally(() => {
+          this.decisionInFlight = false;
+        });
 
-      // Record experience step (every 3rd tick)
-      const score = this.data.score || 0;
-      const kills = this.data.kills || 0;
-      const deaths = this.data.deaths || 0;
-      this.brain.recordStep(
-        score, kills, deaths,
-        this._lastDied, this._lastGotKill, this._lastDamageDealt,
-        false
-      );
+      this.brain.recordStep({
+        currentScore: this.data.score || 0,
+        kills: this.data.kills || 0,
+        deaths: this.data.deaths || 0,
+        died: this._lastDied,
+        gotKill: this._lastGotKill,
+        damageDealt: this._lastDamageDealt,
+        damageTaken: this._lastDamageTaken,
+        survivalSeconds: dt,
+        abilityUsed: this.lastAbilityUsed,
+        shotAccuracy: this.fitness.getAccuracy(),
+        done: false,
+      });
 
-      // Reset per-tick flags
       this._lastGotKill = false;
       this._lastDied = false;
       this._lastDamageDealt = 0;
+      this._lastDamageTaken = 0;
+      this.lastAbilityUsed = false;
     }
 
-    // Arena boundary override
     const distFromCenter = getArrayLength(this.positionArray);
     if (this.mapName === "arena" && distFromCenter > this.config.bot.arenaSafeSize) {
       const dirToCenter = getDirectionArray(this.positionArray, [0, 0, 0]);
@@ -169,7 +185,6 @@ class SmartBot {
       return;
     }
 
-    // Send position
     this._sendPosition();
     this.inputIndex = (this.inputIndex + 1) % INPUT_BUFFER_SIZE;
   }
@@ -177,30 +192,39 @@ class SmartBot {
   _applyDecision(decision) {
     if (!decision || this.matchEnded) return;
 
-    // Apply LLM strategic layer on top of NN reflexes
-    // This HARD-OVERRIDES NN decisions based on agent personality + LLM strategy
     if (this.strategicBrain) {
-      const gameContext = {
+      const crystalCtx = this.closestCrystal
+        ? (() => {
+            const dx = this.closestCrystal.x - this.positionArray[0];
+            const dz = this.closestCrystal.z - this.positionArray[2];
+            const len = Math.sqrt(dx * dx + dz * dz) || 1;
+            return { dirX: dx / len, dirZ: dz / len };
+          })()
+        : null;
+
+      decision = this.strategicBrain.modifyAction(decision, {
         hasEnemy: !!this.closestEnemy,
         enemyDistance: this.closestEnemy?.distance || 999,
         healthPercent: (this.data?.health || 100) / 100,
         score: this.data?.score || 0,
         kills: this.data?.kills || 0,
         deaths: this.data?.deaths || 0,
-        posX: this.positionArray[0] / 60, // Normalized position
+        posX: this.positionArray[0] / 60,
         posZ: this.positionArray[2] / 60,
-      };
-      decision = this.strategicBrain.modifyAction(decision, gameContext);
+        closestCrystal: crystalCtx,
+      });
     }
 
     const input = this.inputBuffer[this.inputIndex];
     if (!input) return;
 
-    // Movement
     let moveX = decision.moveX;
     let moveZ = decision.moveZ;
     const moveLen = Math.sqrt(moveX * moveX + moveZ * moveZ);
-    if (moveLen > 0) { moveX /= moveLen; moveZ /= moveLen; }
+    if (moveLen > 0) {
+      moveX /= moveLen;
+      moveZ /= moveLen;
+    }
 
     this.lastMoveX = moveX * 7;
     this.lastMoveZ = moveZ * 7;
@@ -211,23 +235,24 @@ class SmartBot {
     input.speed = 7;
     input.animation = moveLen > 0.1 ? 2 : 0;
 
-    // Aim
     if (this.closestEnemy) {
       input.target[0] = this.closestEnemy.position.x + decision.aimOffsetX;
       input.target[1] = this.closestEnemy.position.y || 0;
       input.target[2] = this.closestEnemy.position.z + decision.aimOffsetZ;
+    } else if (this.closestCrystal) {
+      input.target[0] = this.closestCrystal.x;
+      input.target[1] = this.closestCrystal.y || 0;
+      input.target[2] = this.closestCrystal.z;
     } else {
       input.target[0] = this.positionArray[0] + moveX * 10;
       input.target[1] = 0;
       input.target[2] = this.positionArray[2] + moveZ * 10;
     }
 
-    // Shoot
     if (decision.shouldShoot && this.closestEnemy && this.coolDownTimer <= 0 && this.data?.health > 0) {
       this._shoot();
     }
 
-    // Ability
     if (decision.shouldUseAbility && this.abilityTimer <= 0) {
       this._useAbility();
       this.abilityTimer = rand(5, 15);
@@ -238,7 +263,7 @@ class SmartBot {
     if (!this.closestEnemy || !this.data) return;
     const target = [
       this.closestEnemy.position.x + rand(-1, 1),
-      (this.closestEnemy.position.y || 0),
+      this.closestEnemy.position.y || 0,
       this.closestEnemy.position.z + rand(-1, 1),
     ];
     const buffer = encodeShoot(this.positionArray, target, this.data.weaponType || this.weaponType);
@@ -253,6 +278,8 @@ class SmartBot {
     const abilityData = this.data.abilities.get?.(ability);
     if (abilityData?.ready) {
       this.room.send("room:player:ability:use", { ability });
+      this.fitness.recordAbilityUse();
+      this.lastAbilityUsed = true;
     }
   }
 
@@ -271,6 +298,22 @@ class SmartBot {
   _sendInputsBatch(inputs) {
     const buffer = encodeInput(this.userID, inputs);
     this.room.send("room:player:input", buffer);
+    this._inputsSent += inputs.length;
+    this.reporter?.incrementCounter("inputsSent", inputs.length);
+  }
+
+  markStateUpdate() {
+    this._stateUpdatesSeen += 1;
+    this.reporter?.incrementCounter("stateUpdates");
+  }
+
+  getRuntimeStats() {
+    return {
+      inputsSent: this._inputsSent,
+      stateUpdates: this._stateUpdatesSeen,
+      modelAlias: this.modelAlias,
+      modelVersion: this.brain?.modelVersion || 0,
+    };
   }
 
   getFitness(weights) {
@@ -284,6 +327,7 @@ class SmartBot {
     this.data = null;
     this.gameState = null;
     this.closestEnemy = null;
+    this.closestCrystal = null;
   }
 }
 

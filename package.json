@@ -1,14 +1,14 @@
 {
   "name": "ai-game-playground",
   "version": "1.0.0",
-  "description": "Self-learning AI bots for 3D shooter arena using NEAT neuroevolution",
+  "description": "Reliable self-improving arena bots with PPO, ONNX inference, and operator telemetry",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dashboard": "node web/server.js",
-    "watch": "node src/index.js --watch",
-    "resume": "node src/index.js --resume",
-    "test:connect": "node src/index.js --test-connect"
+    "test": "node --test test/*.test.js",
+    "test:connect": "node src/index.js --test-connect",
+    "test:smoke": "node scripts/smoke-test.js"
   },
   "engines": {
     "node": ">=18.17.0"

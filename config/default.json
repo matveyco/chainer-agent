@@ -2,14 +2,22 @@
   "server": {
     "roomName": "TimeLimited",
     "mapName": "arena",
-    "weaponType": "rocket"
+    "weaponType": "rocket",
+    "colyseusVersion": "0.15.25"
   },
-  "evolution": {
-    "populationSize": 15,
-    "elitism": 2,
-    "mutationRate": 0.3,
-    "mutationAmount": 0.1,
-    "maxStagnation": 15
+  "rooms": {
+    "count": 2,
+    "agentsPerRoom": 12,
+    "staggerMs": 5000,
+    "assignmentPollMs": 1500,
+    "assignmentTimeoutMs": 90000,
+    "minReadyRatio": 0.5,
+    "requeueBackoffMs": 3000
+  },
+  "training": {
+    "selectionInterval": 10,
+    "numCull": 5,
+    "defaultModelAlias": "latest"
   },
   "fitness": {
     "killWeight": 100,
@@ -22,13 +30,41 @@
     "matchTimeout": 120000,
     "respawnDelay": 3,
     "clientStaggerMs": 100,
+    "decisionIntervalTicks": 3,
     "arenaSize": 60,
-    "arenaSafeSize": 55
+    "arenaSafeSize": 55,
+    "modelReloadBackoffMs": 10000
+  },
+  "reward": {
+    "scoreDeltaWeight": 0.02,
+    "killBonus": 1,
+    "deathPenalty": -0.75,
+    "damageWeight": 0.004,
+    "damageTakenPenalty": -0.002,
+    "survivalWeight": 0.01,
+    "accuracyWeight": 0.2,
+    "abilityValueWeight": 0.08,
+    "antiSuicidePenalty": -0.3
+  },
+  "runtime": {
+    "port": 3101,
+    "lockFile": "/tmp/chainer-agent.lock",
+    "eventsLimit": 200,
+    "telemetryFlushMs": 1000
   },
   "persistence": {
     "savePopulationEvery": 10,
     "generationsDir": "data/generations",
     "bestDir": "data/best",
-    "logsDir": "data/logs"
+    "logsDir": "data/logs",
+    "runtimeStateFile": "data/runtime_state.json",
+    "runtimeEventsFile": "data/runtime_events.jsonl",
+    "rosterFile": "config/roster.json",
+    "profilesFile": "data/agent_profiles.json"
+  },
+  "evaluation": {
+    "minEpisodes": 10,
+    "promotionMargin": 0.05,
+    "sampleMatches": 3
   }
 }
