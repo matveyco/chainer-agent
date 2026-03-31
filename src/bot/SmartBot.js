@@ -7,6 +7,7 @@
  */
 
 const { AgentBrain } = require("./AgentBrain");
+const { StrategicBrain } = require("./StrategicBrain");
 const { StateExtractor } = require("./StateExtractor");
 const { FitnessTracker } = require("../metrics/FitnessTracker");
 const { encodeInput, encodeShoot, generateID } = require("../network/Protocol");
@@ -23,8 +24,16 @@ class SmartBot {
     this.mapName = config.server.mapName;
     this.weaponType = config.server.weaponType;
 
-    // Brain (initialized later via initBrain)
+    // Brains: NN for reflexes, LLM for strategy
     this.brain = null;
+    this.strategicBrain = null;
+    if (config.ollamaApiKey) {
+      this.strategicBrain = new StrategicBrain(
+        agentId,
+        config.ollamaApiKey,
+        config.ollamaModel || "kimi-k2.5:cloud"
+      );
+    }
     this.stateExtractor = new StateExtractor();
     this.fitness = new FitnessTracker();
 
@@ -167,6 +176,18 @@ class SmartBot {
 
   _applyDecision(decision) {
     if (!decision || this.matchEnded) return;
+
+    // Apply LLM strategic layer on top of NN reflexes
+    if (this.strategicBrain) {
+      const gameContext = {
+        hasEnemy: !!this.closestEnemy,
+        healthPercent: (this.data?.health || 100) / 100,
+        score: this.data?.score || 0,
+        kills: this.data?.kills || 0,
+        deaths: this.data?.deaths || 0,
+      };
+      decision = this.strategicBrain.modifyAction(decision, gameContext);
+    }
 
     const input = this.inputBuffer[this.inputIndex];
     if (!input) return;

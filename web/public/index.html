@@ -208,6 +208,17 @@
   </div>
 </div>
 
+<!-- Agent Detail Modal -->
+<div class="modal-overlay" id="agent-detail-modal">
+  <div class="modal" style="min-width:600px;max-width:800px;max-height:85vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px">
+      <h3 id="detail-title">Agent Details</h3>
+      <button class="btn" onclick="closeDetail()" style="padding:4px 10px">X</button>
+    </div>
+    <div id="detail-content">Loading...</div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -281,7 +292,7 @@ function renderTable() {
 
     return `<tr>
       <td class="${rankClass}">${i + 1}</td>
-      <td><strong>${a.agent_id}</strong></td>
+      <td><a href="#" onclick="showDetail('${a.agent_id}');return false" style="color:#6bf"><strong>${a.agent_id}</strong></a></td>
       <td class="${scoreClass}">${a.avg_score_50}</td>
       <td>${a.best_score}</td>
       <td class="${kdClass}">${a.avg_kd_50}</td>
@@ -291,7 +302,8 @@ function renderTable() {
       <td>${a.buffer_size}</td>
       <td><div class="sparkline">${sparkline}</div></td>
       <td class="agent-actions">
-        <button onclick="resetAgent('${a.agent_id}')" class="delete" title="Reset to random">Reset</button>
+        <button onclick="showDetail('${a.agent_id}')" title="View details">View</button>
+        <button onclick="resetAgent('${a.agent_id}')" class="delete" title="Reset">Reset</button>
       </td>
     </tr>`;
   }).join('');
@@ -373,6 +385,122 @@ function showToast(msg) {
   toast.textContent = msg;
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 3000);
+}
+
+// ── Agent Detail View ──
+
+async function showDetail(agentId) {
+  document.getElementById('detail-title').textContent = agentId;
+  document.getElementById('detail-content').innerHTML = 'Loading...';
+  document.getElementById('agent-detail-modal').classList.add('active');
+
+  // Fetch profile + training history in parallel
+  const [profileRes, historyRes, statsRes] = await Promise.all([
+    fetch(`/api/profile/${agentId}`).then(r => r.json()).catch(() => null),
+    fetch(`/api/agent/${agentId}/history`).then(r => r.json()).catch(() => []),
+    fetch('/api/stats').then(r => r.json()).catch(() => ({ agents: [] })),
+  ]);
+
+  const agent = (statsRes.agents || []).find(a => a.agent_id === agentId) || {};
+  const profile = profileRes || {};
+  const history = historyRes || [];
+
+  const personality = profile.personality || {};
+  const strategy = profile.strategy || {};
+  const thoughts = profile.thought_log || [];
+  const matchHist = profile.match_history || [];
+  const lifetime = profile.lifetime || {};
+
+  // Strategy bars
+  const strategyBars = Object.entries(strategy).map(([key, val]) => {
+    const pct = Math.round((val || 0) * 100);
+    const color = pct > 60 ? '#4f4' : pct < 30 ? '#f88' : '#6bf';
+    return `<div style="margin:4px 0">
+      <span style="display:inline-block;width:140px;color:#888;font-size:12px">${key}</span>
+      <div style="display:inline-block;width:200px;background:#1a1a2e;height:16px;border-radius:3px;vertical-align:middle">
+        <div style="width:${pct}%;background:${color};height:100%;border-radius:3px;transition:width 0.5s"></div>
+      </div>
+      <span style="color:#fff;margin-left:8px;font-size:12px">${(val || 0).toFixed(2)}</span>
+    </div>`;
+  }).join('');
+
+  // Match history mini chart
+  const scores = matchHist.map(m => m.score || 0);
+  const maxScore = Math.max(...scores, 1);
+  const matchChart = scores.map(s => {
+    const h = Math.max(3, (s / maxScore) * 80);
+    return `<div class="bar" style="height:${h}px" title="Score: ${s}"></div>`;
+  }).join('');
+
+  // Thought log
+  const thoughtsHtml = thoughts.length > 0
+    ? thoughts.slice(-5).reverse().map(t =>
+      `<div style="background:#1a1a2e;padding:8px 10px;border-radius:4px;margin:5px 0;font-size:12px;color:#ccc">
+        <span style="color:#888">[Match ${t.match}]</span> ${t.thought}
+      </div>`
+    ).join('')
+    : '<div style="color:#666;font-size:12px">No LLM thoughts yet (runs every 3 matches)</div>';
+
+  document.getElementById('detail-content').innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px">
+      <div class="card">
+        <h3>Identity / DNA</h3>
+        <div style="font-size:22px;color:#6bf;margin:5px 0">${personality.archetype || 'Unknown'}</div>
+        <div style="color:#aaa;font-size:12px">${personality.traits || 'No personality assigned'}</div>
+        <div style="color:#666;font-size:11px;margin-top:5px">Seed: ${personality.seed ?? '-'}</div>
+      </div>
+      <div class="card">
+        <h3>Lifetime Stats</h3>
+        <div style="font-size:14px;line-height:1.8">
+          <div>Matches: <strong>${lifetime.matches || agent.episodes || 0}</strong></div>
+          <div>Total Score: <strong>${lifetime.total_score || 0}</strong></div>
+          <div>K/D: <strong style="color:${(lifetime.avg_kd||0) >= 1 ? '#4f4' : '#f88'}">${(lifetime.avg_kd || 0).toFixed(2)}</strong>
+            (${lifetime.total_kills || 0}K / ${lifetime.total_deaths || 0}D)</div>
+          <div>Model: <strong>v${agent.model_version || 0}</strong> (${agent.train_steps || 0} trained)</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:15px">
+      <h3>Current Strategy</h3>
+      ${strategyBars || '<div style="color:#666">No strategy data (LLM not active)</div>'}
+    </div>
+
+    <div class="card" style="margin-top:15px">
+      <h3>Current Plan</h3>
+      <div style="color:#fff;font-size:14px;padding:5px 0">${profile.current_plan || 'No plan yet'}</div>
+    </div>
+
+    <div class="card" style="margin-top:15px">
+      <h3>LLM Strategic Thoughts</h3>
+      ${thoughtsHtml}
+    </div>
+
+    <div class="card" style="margin-top:15px">
+      <h3>Score History (last ${scores.length} matches)</h3>
+      <div class="sparkline" style="height:80px">${matchChart}</div>
+    </div>
+
+    <div class="card" style="margin-top:15px">
+      <h3>Training History (PPO)</h3>
+      <div style="color:#888;font-size:12px">${history.length} training log entries</div>
+      ${history.length > 0 ? `<div style="max-height:150px;overflow-y:auto;margin-top:8px">
+        <table style="font-size:11px;width:100%">
+          <tr><th>Score</th><th>K/D</th><th>Version</th><th>Episodes</th></tr>
+          ${history.slice(-10).reverse().map(h => `<tr>
+            <td>${h.avg_score_50}</td>
+            <td>${h.avg_kd_50}</td>
+            <td>v${h.model_version}</td>
+            <td>${h.episodes}</td>
+          </tr>`).join('')}
+        </table>
+      </div>` : ''}
+    </div>
+  `;
+}
+
+function closeDetail() {
+  document.getElementById('agent-detail-modal').classList.remove('active');
 }
 
 // Auto-refresh every 5 seconds

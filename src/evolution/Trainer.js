@@ -41,8 +41,9 @@ class Trainer {
     this.selectionInterval = config.selectionInterval || 10;
     this.numCull = config.numCull || 5;
 
-    // Build persistent agent IDs
+    // Build persistent agent IDs and strategic brains
     this.allAgentIds = [];
+    this.strategicBrains = new Map(); // agentId -> StrategicBrain
     for (let i = 0; i < this.totalAgents; i++) {
       this.allAgentIds.push(`agent_${i}`);
     }
@@ -219,15 +220,26 @@ class Trainer {
     clearInterval(gameLoop);
     clearInterval(flushInterval);
 
-    // End of match: flush + report
+    // End of match: flush experience + LLM analysis + report
     for (const bot of bots) {
+      const score = bot.data?.score || 0;
+      const kills = bot.data?.kills || 0;
+      const deaths = bot.data?.deaths || 0;
+      const damageDealt = bot.fitness?.damageDealt || 0;
+      const survivalTime = bot.fitness?.survivalTime || 0;
+
       if (bot.brain) {
-        const score = bot.data?.score || 0;
-        const kills = bot.data?.kills || 0;
-        const deaths = bot.data?.deaths || 0;
         bot.brain.recordStep(score, kills, deaths, false, false, 0, true);
         await bot.brain.flush();
         await bot.brain.reportEpisode(score, kills, deaths);
+      }
+
+      // LLM strategic analysis + save profile
+      if (bot.strategicBrain) {
+        this.strategicBrains.set(bot.agentId, bot.strategicBrain);
+        bot.strategicBrain.analyzeMatch({ score, kills, deaths, damageDealt, survivalTime })
+          .then(() => this._saveProfiles())
+          .catch(() => {});
       }
     }
 
@@ -344,8 +356,31 @@ class Trainer {
     room.onMessage("__playground_message_types", noop);
   }
 
+  getAgentProfile(agentId) {
+    const brain = this.strategicBrains.get(agentId);
+    return brain ? brain.getProfile() : null;
+  }
+
+  getAllProfiles() {
+    const profiles = {};
+    for (const [id, brain] of this.strategicBrains) {
+      profiles[id] = brain.getProfile();
+    }
+    return profiles;
+  }
+
+  _saveProfiles() {
+    try {
+      const fs = require("fs");
+      const dir = "data";
+      if (!require("fs").existsSync(dir)) require("fs").mkdirSync(dir, { recursive: true });
+      fs.writeFileSync("data/agent_profiles.json", JSON.stringify(this.getAllProfiles(), null, 2));
+    } catch {}
+  }
+
   stop() {
     this.running = false;
+    this._saveProfiles();
   }
 
   _formatUptime(ms) {

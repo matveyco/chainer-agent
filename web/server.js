@@ -91,6 +91,35 @@ app.post("/api/agent/:target/clone/:source", async (req, res) => {
   }
 });
 
+// Agent profiles (from strategic brain data)
+app.get("/api/profiles", (req, res) => {
+  try {
+    const profilePath = path.join(__dirname, "../data/agent_profiles.json");
+    if (fs.existsSync(profilePath)) {
+      const profiles = JSON.parse(fs.readFileSync(profilePath, "utf-8"));
+      res.json(profiles);
+    } else {
+      res.json({});
+    }
+  } catch (err) {
+    res.json({});
+  }
+});
+
+app.get("/api/profile/:id", (req, res) => {
+  try {
+    const profilePath = path.join(__dirname, "../data/agent_profiles.json");
+    if (fs.existsSync(profilePath)) {
+      const profiles = JSON.parse(fs.readFileSync(profilePath, "utf-8"));
+      res.json(profiles[req.params.id] || { error: "Not found" });
+    } else {
+      res.json({ error: "No profiles yet" });
+    }
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 // Fallback to index.html for SPA
 app.get("/{*path}", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
