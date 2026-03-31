@@ -92,7 +92,7 @@ app.post("/api/agent/:target/clone/:source", async (req, res) => {
 });
 
 // Fallback to index.html for SPA
-app.get("*", (req, res) => {
+app.get("/{*path}", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
