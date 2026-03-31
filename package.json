@@ -5,6 +5,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "dashboard": "node web/server.js",
     "watch": "node src/index.js --watch",
     "resume": "node src/index.js --resume",
     "test:connect": "node src/index.js --test-connect"
@@ -17,6 +18,7 @@
     "blessed-contrib": "^4.11.0",
     "colyseus.js": "^0.15.25",
     "dotenv": "^17.3.1",
+    "express": "^5.2.1",
     "long": "^5.2.3",
     "neataptic": "^1.4.7",
     "onnxruntime-node": "^1.24.3",

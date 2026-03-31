@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chainer Agent — Training Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'SF Mono', 'Fira Code', monospace; background: #0a0a0f; color: #e0e0e0; }
+    a { color: #6bf; text-decoration: none; }
+
+    .header {
+      background: linear-gradient(135deg, #1a1a2e, #16213e);
+      padding: 20px 30px;
+      border-bottom: 1px solid #333;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .header h1 { font-size: 20px; color: #fff; }
+    .header h1 span { color: #6bf; }
+    .status-bar { display: flex; gap: 20px; font-size: 13px; color: #aaa; }
+    .status-bar .live { color: #4f4; }
+    .status-bar .dead { color: #f44; }
+
+    .grid {
+      display: grid; grid-template-columns: 1fr 1fr 1fr 1fr;
+      gap: 15px; padding: 20px 30px;
+    }
+    .card {
+      background: #12121a; border: 1px solid #222; border-radius: 8px;
+      padding: 15px;
+    }
+    .card h3 { font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 8px; }
+    .card .value { font-size: 28px; font-weight: bold; color: #fff; }
+    .card .sub { font-size: 12px; color: #666; margin-top: 4px; }
+
+    .section { padding: 0 30px 20px; }
+    .section h2 {
+      font-size: 16px; color: #888; text-transform: uppercase;
+      margin-bottom: 12px; padding-top: 20px;
+      border-top: 1px solid #1a1a2e;
+    }
+
+    .controls { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
+    .btn {
+      padding: 8px 16px; border: 1px solid #333; border-radius: 6px;
+      background: #1a1a2e; color: #e0e0e0; cursor: pointer; font-size: 13px;
+      font-family: inherit; transition: all 0.2s;
+    }
+    .btn:hover { background: #252545; border-color: #6bf; }
+    .btn.danger { border-color: #f44; color: #f88; }
+    .btn.danger:hover { background: #2a1515; }
+    .btn.success { border-color: #4f4; color: #8f8; }
+    .btn.success:hover { background: #152a15; }
+
+    table {
+      width: 100%; border-collapse: collapse; font-size: 13px;
+    }
+    th {
+      text-align: left; padding: 10px 12px; background: #1a1a2e;
+      color: #888; font-weight: normal; text-transform: uppercase; font-size: 11px;
+      cursor: pointer; user-select: none;
+    }
+    th:hover { color: #6bf; }
+    td {
+      padding: 10px 12px; border-top: 1px solid #1a1a2e;
+    }
+    tr:hover td { background: #15152a; }
+    .rank { color: #888; }
+    .rank-1 { color: #ffd700; font-weight: bold; }
+    .rank-2 { color: #c0c0c0; }
+    .rank-3 { color: #cd7f32; }
+    .score-high { color: #4f4; }
+    .score-low { color: #f88; }
+    .kd-good { color: #4f4; }
+    .kd-bad { color: #f88; }
+
+    .agent-actions { display: flex; gap: 5px; }
+    .agent-actions button {
+      padding: 3px 8px; border: 1px solid #333; border-radius: 4px;
+      background: transparent; color: #888; cursor: pointer; font-size: 11px;
+      font-family: inherit;
+    }
+    .agent-actions button:hover { color: #6bf; border-color: #6bf; }
+    .agent-actions button.delete:hover { color: #f44; border-color: #f44; }
+
+    .chart-container {
+      background: #12121a; border: 1px solid #222; border-radius: 8px;
+      padding: 15px; margin-top: 15px; min-height: 200px;
+    }
+    .chart-container h3 { font-size: 12px; color: #888; margin-bottom: 10px; }
+    .sparkline {
+      display: flex; align-items: flex-end; gap: 2px; height: 80px;
+    }
+    .sparkline .bar {
+      flex: 1; background: #6bf; border-radius: 1px 1px 0 0;
+      min-width: 3px; transition: height 0.3s;
+    }
+
+    .modal-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      z-index: 100; justify-content: center; align-items: center;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal {
+      background: #12121a; border: 1px solid #333; border-radius: 12px;
+      padding: 25px; min-width: 400px; max-width: 600px;
+    }
+    .modal h3 { margin-bottom: 15px; color: #fff; }
+    .modal select, .modal input {
+      width: 100%; padding: 8px; margin-bottom: 10px;
+      background: #1a1a2e; border: 1px solid #333; border-radius: 4px;
+      color: #e0e0e0; font-family: inherit; font-size: 13px;
+    }
+
+    .toast {
+      position: fixed; bottom: 20px; right: 20px; padding: 12px 20px;
+      background: #1a1a2e; border: 1px solid #333; border-radius: 8px;
+      color: #4f4; font-size: 13px; z-index: 200;
+      transform: translateY(100px); transition: transform 0.3s;
+    }
+    .toast.show { transform: translateY(0); }
+
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>Chainer</span> Agent Dashboard</h1>
+  <div class="status-bar">
+    <span id="status-indicator" class="dead">OFFLINE</span>
+    <span id="status-device">-</span>
+    <span id="status-uptime">-</span>
+    <span id="status-matches">-</span>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h3>Total Agents</h3>
+    <div class="value" id="card-agents">-</div>
+    <div class="sub" id="card-agents-sub">-</div>
+  </div>
+  <div class="card">
+    <h3>Best Score (avg50)</h3>
+    <div class="value" id="card-best-score">-</div>
+    <div class="sub" id="card-best-agent">-</div>
+  </div>
+  <div class="card">
+    <h3>Best K/D (avg50)</h3>
+    <div class="value" id="card-best-kd">-</div>
+    <div class="sub" id="card-best-kd-agent">-</div>
+  </div>
+  <div class="card">
+    <h3>Total Train Steps</h3>
+    <div class="value" id="card-train-steps">-</div>
+    <div class="sub" id="card-experiences">-</div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Controls</h2>
+  <div class="controls">
+    <button class="btn success" onclick="triggerSelection()">Natural Selection (cull 5)</button>
+    <button class="btn" onclick="openCloneModal()">Clone Agent</button>
+    <button class="btn" onclick="refreshStats()">Refresh</button>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Agent Leaderboard</h2>
+  <table>
+    <thead>
+      <tr>
+        <th onclick="sortBy('rank')">#</th>
+        <th onclick="sortBy('agent_id')">Agent</th>
+        <th onclick="sortBy('avg_score_50')">Avg Score</th>
+        <th onclick="sortBy('best_score')">Best Score</th>
+        <th onclick="sortBy('avg_kd_50')">Avg K/D</th>
+        <th onclick="sortBy('model_version')">Version</th>
+        <th onclick="sortBy('episodes')">Episodes</th>
+        <th onclick="sortBy('train_steps')">Trained</th>
+        <th onclick="sortBy('buffer_size')">Buffer</th>
+        <th>Score Trend</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="agent-table"></tbody>
+  </table>
+</div>
+
+<!-- Clone Modal -->
+<div class="modal-overlay" id="clone-modal">
+  <div class="modal">
+    <h3>Clone Agent</h3>
+    <label style="color:#888;font-size:12px">Source (strong agent to copy from)</label>
+    <select id="clone-source"></select>
+    <label style="color:#888;font-size:12px">Target (weak agent to replace)</label>
+    <select id="clone-target"></select>
+    <label style="color:#888;font-size:12px">Mutation rate (0 = exact copy)</label>
+    <input id="clone-mutation" type="number" value="0.02" step="0.01" min="0" max="0.5">
+    <div style="display:flex;gap:10px;margin-top:10px">
+      <button class="btn success" onclick="doClone()">Clone</button>
+      <button class="btn" onclick="closeCloneModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let agents = [];
+let sortField = 'avg_score_50';
+let sortDir = -1;
+
+async function refreshStats() {
+  try {
+    const res = await fetch('/api/stats');
+    const data = await res.json();
+
+    if (data.error) {
+      document.getElementById('status-indicator').className = 'dead';
+      document.getElementById('status-indicator').textContent = 'OFFLINE';
+      return;
+    }
+
+    // Status bar
+    document.getElementById('status-indicator').className = 'live';
+    document.getElementById('status-indicator').textContent = 'LIVE';
+    document.getElementById('status-device').textContent = data.gpu || data.device;
+    document.getElementById('status-uptime').textContent = 'Up: ' + (data.uptime_human || '-');
+    document.getElementById('status-matches').textContent = 'Exp: ' + (data.total_experiences || 0).toLocaleString();
+
+    agents = data.agents || [];
+
+    // Cards
+    document.getElementById('card-agents').textContent = agents.length;
+    document.getElementById('card-agents-sub').textContent = `${data.errors || 0} errors`;
+
+    if (agents.length > 0) {
+      const bestScore = agents.reduce((a, b) => a.avg_score_50 > b.avg_score_50 ? a : b);
+      document.getElementById('card-best-score').textContent = bestScore.avg_score_50;
+      document.getElementById('card-best-agent').textContent = bestScore.agent_id;
+
+      const bestKD = agents.reduce((a, b) => a.avg_kd_50 > b.avg_kd_50 ? a : b);
+      document.getElementById('card-best-kd').textContent = bestKD.avg_kd_50;
+      document.getElementById('card-best-kd-agent').textContent = bestKD.agent_id;
+    }
+
+    document.getElementById('card-train-steps').textContent = (data.total_train_steps || 0).toLocaleString();
+    document.getElementById('card-experiences').textContent = (data.total_experiences || 0).toLocaleString() + ' exp';
+
+    renderTable();
+  } catch (err) {
+    document.getElementById('status-indicator').className = 'dead';
+    document.getElementById('status-indicator').textContent = 'OFFLINE';
+  }
+}
+
+function renderTable() {
+  const sorted = [...agents].sort((a, b) => {
+    const va = a[sortField] ?? 0;
+    const vb = b[sortField] ?? 0;
+    if (typeof va === 'string') return sortDir * va.localeCompare(vb);
+    return sortDir * (vb - va);
+  });
+
+  const tbody = document.getElementById('agent-table');
+  tbody.innerHTML = sorted.map((a, i) => {
+    const rankClass = i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : 'rank';
+    const scoreClass = a.avg_score_50 > 500 ? 'score-high' : a.avg_score_50 < 100 ? 'score-low' : '';
+    const kdClass = a.avg_kd_50 >= 1.5 ? 'kd-good' : a.avg_kd_50 < 0.5 ? 'kd-bad' : '';
+
+    const sparkline = (a.score_history || []).map(s => {
+      const max = Math.max(...(a.score_history || [1]), 1);
+      const h = Math.max(3, (s / max) * 60);
+      return `<div class="bar" style="height:${h}px" title="${s}"></div>`;
+    }).join('');
+
+    return `<tr>
+      <td class="${rankClass}">${i + 1}</td>
+      <td><strong>${a.agent_id}</strong></td>
+      <td class="${scoreClass}">${a.avg_score_50}</td>
+      <td>${a.best_score}</td>
+      <td class="${kdClass}">${a.avg_kd_50}</td>
+      <td>v${a.model_version}</td>
+      <td>${a.episodes}</td>
+      <td>${a.train_steps}</td>
+      <td>${a.buffer_size}</td>
+      <td><div class="sparkline">${sparkline}</div></td>
+      <td class="agent-actions">
+        <button onclick="resetAgent('${a.agent_id}')" class="delete" title="Reset to random">Reset</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function sortBy(field) {
+  if (sortField === field) sortDir *= -1;
+  else { sortField = field; sortDir = -1; }
+  renderTable();
+}
+
+async function triggerSelection() {
+  if (!confirm('Run natural selection? This will replace the 5 weakest agents with mutated clones of the 5 strongest.')) return;
+  try {
+    const res = await fetch('/api/select', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+    const data = await res.json();
+    showToast('Natural selection complete');
+    refreshStats();
+  } catch (err) {
+    showToast('Selection failed: ' + err.message);
+  }
+}
+
+async function resetAgent(agentId) {
+  if (!confirm(`Reset ${agentId}? This will wipe its learned weights and start fresh.`)) return;
+  try {
+    await fetch(`/api/agent/${agentId}/reset`, { method: 'POST' });
+    showToast(`${agentId} reset to random`);
+    refreshStats();
+  } catch (err) {
+    showToast('Reset failed: ' + err.message);
+  }
+}
+
+function openCloneModal() {
+  const srcSelect = document.getElementById('clone-source');
+  const tgtSelect = document.getElementById('clone-target');
+  const sorted = [...agents].sort((a, b) => b.avg_score_50 - a.avg_score_50);
+
+  srcSelect.innerHTML = sorted.map(a =>
+    `<option value="${a.agent_id}">${a.agent_id} (score: ${a.avg_score_50}, kd: ${a.avg_kd_50})</option>`
+  ).join('');
+
+  const weakFirst = [...agents].sort((a, b) => a.avg_score_50 - b.avg_score_50);
+  tgtSelect.innerHTML = weakFirst.map(a =>
+    `<option value="${a.agent_id}">${a.agent_id} (score: ${a.avg_score_50})</option>`
+  ).join('');
+
+  document.getElementById('clone-modal').classList.add('active');
+}
+
+function closeCloneModal() {
+  document.getElementById('clone-modal').classList.remove('active');
+}
+
+async function doClone() {
+  const source = document.getElementById('clone-source').value;
+  const target = document.getElementById('clone-target').value;
+  const mutation = parseFloat(document.getElementById('clone-mutation').value);
+
+  if (source === target) { showToast('Source and target must be different'); return; }
+
+  try {
+    await fetch(`/api/agent/${target}/clone/${source}`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ mutation }),
+    });
+    showToast(`Cloned ${source} -> ${target} (mutation: ${mutation})`);
+    closeCloneModal();
+    refreshStats();
+  } catch (err) {
+    showToast('Clone failed: ' + err.message);
+  }
+}
+
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 3000);
+}
+
+// Auto-refresh every 5 seconds
+refreshStats();
+setInterval(refreshStats, 5000);
+</script>
+
+</body>
+</html>

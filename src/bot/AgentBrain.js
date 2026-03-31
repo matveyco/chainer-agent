@@ -76,8 +76,12 @@ class AgentBrain {
    * @returns {Object} action decisions
    */
   async decide(stateVector) {
-    // Store state for experience collection
-    this.lastState = Array.from(stateVector);
+    // Validate state — no NaN/Inf
+    const stateArr = Array.from(stateVector);
+    for (let i = 0; i < stateArr.length; i++) {
+      if (!Number.isFinite(stateArr[i])) stateArr[i] = 0;
+    }
+    this.lastState = stateArr;
 
     let actionValues;
 
@@ -146,6 +150,14 @@ class AgentBrain {
    * Call this periodically or at end of match.
    */
   async flush() {
+    if (this.experienceBuffer.length === 0) return;
+
+    // Filter out any experiences with invalid data
+    this.experienceBuffer = this.experienceBuffer.filter((e) => {
+      if (!e.state || !e.action) return false;
+      return e.state.every(Number.isFinite) && e.action.every(Number.isFinite);
+    });
+
     if (this.experienceBuffer.length === 0) return;
 
     try {
