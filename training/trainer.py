@@ -81,7 +81,8 @@ class ActorOnly(nn.Module):
 class Agent:
     def __init__(self, agent_id: str):
         self.agent_id = agent_id
-        self.model = ActorCritic()        self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE)
+        self.model = ActorCritic()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE)
         self.states, self.actions, self.rewards = [], [], []
         self.values, self.log_probs, self.dones = [], [], []
         self.total_episodes = 0
@@ -200,7 +201,8 @@ class PPOTrainer:
                 done = 1.0 if t.get("done") else 0.0
 
                 # Compute value and log_prob on same device as model
-                state_t = torch.FloatTensor(state).unsqueeze(0)                action_t = torch.FloatTensor(action).unsqueeze(0)
+                state_t = torch.FloatTensor(state).unsqueeze(0)
+                action_t = torch.FloatTensor(action).unsqueeze(0)
                 with torch.no_grad():
                     action_mean, log_std, value = agent.model(state_t)
                     std = log_std.exp().clamp(min=1e-6)
@@ -240,7 +242,10 @@ class PPOTrainer:
         agent = self.agents[agent_id]
         t0 = time.time()
 
-        states = torch.FloatTensor(np.array(agent.states))        actions = torch.FloatTensor(np.array(agent.actions))        old_log_probs = torch.FloatTensor(agent.log_probs)        rewards = list(agent.rewards)
+        states = torch.FloatTensor(np.array(agent.states))
+        actions = torch.FloatTensor(np.array(agent.actions))
+        old_log_probs = torch.FloatTensor(agent.log_probs)
+        rewards = list(agent.rewards)
         values = list(agent.values)
         dones = list(agent.dones)
 
@@ -253,7 +258,9 @@ class PPOTrainer:
             gae = delta + GAMMA * GAE_LAMBDA * (1 - dones[t]) * gae
             advantages[t] = gae
 
-        advantages = torch.FloatTensor(advantages)        returns = advantages + torch.FloatTensor(values)        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = torch.FloatTensor(advantages)
+        returns = advantages + torch.FloatTensor(values)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # PPO update
         for epoch in range(PPO_EPOCHS):
