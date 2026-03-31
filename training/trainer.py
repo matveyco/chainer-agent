@@ -250,18 +250,18 @@ class PPOTrainer:
         states = torch.FloatTensor(np.array(agent.states)).to(DEVICE)
         actions = torch.FloatTensor(np.array(agent.actions)).to(DEVICE)
         old_log_probs = torch.FloatTensor(agent.log_probs).to(DEVICE)
-        rewards = agent.rewards
-        values = agent.values
-        dones = agent.dones
+        rewards = list(agent.rewards)
+        values = list(agent.values)
+        dones = list(agent.dones)
 
-        # GAE advantages
-        advantages = []
+        # GAE advantages (computed on CPU, then moved to device)
+        advantages = [0.0] * len(rewards)
         gae = 0.0
         for t in reversed(range(len(rewards))):
             next_val = values[t + 1] if t < len(rewards) - 1 else 0.0
             delta = rewards[t] + GAMMA * next_val * (1 - dones[t]) - values[t]
             gae = delta + GAMMA * GAE_LAMBDA * (1 - dones[t]) * gae
-            advantages.insert(0, gae)
+            advantages[t] = gae
 
         advantages = torch.FloatTensor(advantages).to(DEVICE)
         returns = advantages + torch.FloatTensor(values).to(DEVICE)
