@@ -200,18 +200,15 @@ class PPOTrainer:
 
                 done = 1.0 if t.get("done") else 0.0
 
-                # Compute value and log_prob ON CPU to avoid CUDA crashes
-                state_t = torch.FloatTensor(state).unsqueeze(0)
-                action_t = torch.FloatTensor(action).unsqueeze(0)
+                # Compute value and log_prob on same device as model
+                state_t = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
+                action_t = torch.FloatTensor(action).unsqueeze(0).to(DEVICE)
 
                 with torch.no_grad():
-                    # Run model on CPU for safety
-                    model_cpu = agent.model.cpu()
-                    action_mean, log_std, value = model_cpu(state_t)
+                    action_mean, log_std, value = agent.model(state_t)
                     std = log_std.exp().clamp(min=1e-6)
                     dist = torch.distributions.Normal(action_mean, std)
                     log_prob = dist.log_prob(action_t).sum(-1)
-                    agent.model.to(DEVICE)
 
                 agent.add_experience(
                     state, action, reward,
@@ -323,7 +320,9 @@ class PPOTrainer:
 
     def _export_onnx(self, agent_id: str):
         agent = self.agents[agent_id]
-        actor = ActorOnly(agent.model).cpu()
+        # Create a separate copy on CPU for export (don't move the training model)
+        import copy
+        actor = ActorOnly(copy.deepcopy(agent.model).cpu())
         actor.eval()
         dummy = torch.randn(1, STATE_DIM)
         onnx_path = MODELS_DIR / f"{agent_id}.onnx"
@@ -342,8 +341,6 @@ class PPOTrainer:
             model = onnx.load(str(onnx_path))
             onnx.save(model, str(onnx_path))
             data_path.unlink()
-
-        agent.model.to(DEVICE)
 
     def _save_checkpoint(self, agent_id: str):
         agent = self.agents[agent_id]
