@@ -49,6 +49,10 @@ ENTROPY_COEF = 0.01
 VALUE_COEF = 0.5
 PPO_EPOCHS = 4
 MODEL_SCHEMA_VERSION = 3
+LOG_STD_MIN = -5.0
+LOG_STD_MAX = 2.0
+INPUT_CLAMP = 8.0
+ACTION_CLAMP = 1.0
 MODELS_DIR = Path("models")
 POLICIES_DIR = MODELS_DIR / "policies"
 AGENTS_DIR = MODELS_DIR / "agents"
@@ -108,6 +112,13 @@ def _safe_mean(values):
     return float(np.mean(values)) if values else 0.0
 
 
+def _sanitize_tensor(tensor: torch.Tensor, clamp_min=None, clamp_max=None) -> torch.Tensor:
+    tensor = torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=-1.0)
+    if clamp_min is not None or clamp_max is not None:
+        tensor = torch.clamp(tensor, min=clamp_min, max=clamp_max)
+    return tensor
+
+
 def _read_json(path: Path, default):
     try:
         if path.exists():
@@ -157,9 +168,16 @@ class ConditionedActorCritic(nn.Module):
 
         agent_embedding = self.agent_embedding(agent_index)
         archetype_embedding = self.archetype_embedding(archetype_index)
-        joined = torch.cat([state, strategy, agent_embedding, archetype_embedding], dim=-1)
-        shared = self.shared(joined)
-        return self.actor_mean(shared), self.actor_log_std, self.critic(shared)
+        joined = _sanitize_tensor(
+            torch.cat([state, strategy, agent_embedding, archetype_embedding], dim=-1),
+            clamp_min=-INPUT_CLAMP,
+            clamp_max=INPUT_CLAMP,
+        )
+        shared = _sanitize_tensor(self.shared(joined), clamp_min=-INPUT_CLAMP, clamp_max=INPUT_CLAMP)
+        mean = torch.tanh(self.actor_mean(shared))
+        log_std = torch.clamp(self.actor_log_std, min=LOG_STD_MIN, max=LOG_STD_MAX)
+        value = self.critic(shared)
+        return mean, log_std, value
 
     def resize_embeddings(self, agent_count: int, archetype_count: int):
         self.agent_embedding = self._resize_embedding(self.agent_embedding, agent_count)
@@ -346,6 +364,12 @@ class PolicyFamily:
 
     def has_enough_experience(self):
         return len(self.states) >= BATCH_SIZE
+
+    def has_finite_parameters(self):
+        for tensor in self.model.state_dict().values():
+            if not torch.isfinite(tensor).all():
+                return False
+        return True
 
     def get_summary(self, aliases: dict | None = None):
         return {
@@ -593,6 +617,9 @@ class PPOTrainer:
             if not _is_valid_float_list(action, ACTION_DIM):
                 continue
 
+            state = [max(-INPUT_CLAMP, min(INPUT_CLAMP, float(value))) for value in state]
+            action = [max(-ACTION_CLAMP, min(ACTION_CLAMP, float(value))) for value in action]
+
             reward = float(transition.get("reward", 0))
             if not math.isfinite(reward):
                 reward = 0.0
@@ -606,9 +633,13 @@ class PPOTrainer:
             strategy_t = torch.FloatTensor([strategy_values])
             with torch.no_grad():
                 action_mean, log_std, value = family.model(state_t, agent_t, archetype_t, strategy_t)
+                if not torch.isfinite(action_mean).all() or not torch.isfinite(log_std).all() or not torch.isfinite(value).all():
+                    continue
                 std = log_std.exp().clamp(min=1e-6)
                 dist = torch.distributions.Normal(action_mean, std)
                 log_prob = dist.log_prob(action_t).sum(-1)
+                if not torch.isfinite(log_prob).all():
+                    continue
 
             family.add_transition(
                 state,
@@ -641,61 +672,79 @@ class PPOTrainer:
     def _train_family(self, family_id: str):
         family = self.families[family_id]
         t0 = time.time()
+        snapshot = copy.deepcopy(family.model.state_dict())
 
-        states = torch.FloatTensor(np.array(family.states))
-        actions = torch.FloatTensor(np.array(family.actions))
-        agent_indices = torch.LongTensor(np.array(family.agent_indices))
-        archetype_indices = torch.LongTensor(np.array(family.archetype_indices))
-        strategies = torch.FloatTensor(np.array(family.strategy_vectors))
-        old_log_probs = torch.FloatTensor(family.log_probs)
-        rewards = list(family.rewards)
-        values = list(family.values)
-        dones = list(family.dones)
+        try:
+            states = _sanitize_tensor(torch.FloatTensor(np.array(family.states)), clamp_min=-INPUT_CLAMP, clamp_max=INPUT_CLAMP)
+            actions = _sanitize_tensor(torch.FloatTensor(np.array(family.actions)), clamp_min=-ACTION_CLAMP, clamp_max=ACTION_CLAMP)
+            agent_indices = torch.LongTensor(np.array(family.agent_indices))
+            archetype_indices = torch.LongTensor(np.array(family.archetype_indices))
+            strategies = _sanitize_tensor(torch.FloatTensor(np.array(family.strategy_vectors)), clamp_min=0.0, clamp_max=1.0)
+            old_log_probs = _sanitize_tensor(torch.FloatTensor(family.log_probs), clamp_min=-100.0, clamp_max=100.0)
+            rewards = [max(-20.0, min(20.0, float(reward) if math.isfinite(reward) else 0.0)) for reward in family.rewards]
+            values = [float(value) if math.isfinite(value) else 0.0 for value in family.values]
+            dones = [1.0 if done else 0.0 for done in family.dones]
 
-        advantages = [0.0] * len(rewards)
-        gae = 0.0
-        for idx in reversed(range(len(rewards))):
-            next_value = values[idx + 1] if idx < len(rewards) - 1 else 0.0
-            delta = rewards[idx] + GAMMA * next_value * (1 - dones[idx]) - values[idx]
-            gae = delta + GAMMA * GAE_LAMBDA * (1 - dones[idx]) * gae
-            advantages[idx] = gae
+            advantages = [0.0] * len(rewards)
+            gae = 0.0
+            for idx in reversed(range(len(rewards))):
+                next_value = values[idx + 1] if idx < len(rewards) - 1 else 0.0
+                delta = rewards[idx] + GAMMA * next_value * (1 - dones[idx]) - values[idx]
+                gae = delta + GAMMA * GAE_LAMBDA * (1 - dones[idx]) * gae
+                if not math.isfinite(gae):
+                    gae = 0.0
+                advantages[idx] = gae
 
-        advantages_t = torch.FloatTensor(advantages)
-        returns = advantages_t + torch.FloatTensor(values)
-        advantages_t = (advantages_t - advantages_t.mean()) / (advantages_t.std() + 1e-8)
+            advantages_t = _sanitize_tensor(torch.FloatTensor(advantages), clamp_min=-100.0, clamp_max=100.0)
+            returns = _sanitize_tensor(advantages_t + torch.FloatTensor(values), clamp_min=-100.0, clamp_max=100.0)
+            advantages_t = (advantages_t - advantages_t.mean()) / (advantages_t.std() + 1e-8)
+            advantages_t = _sanitize_tensor(advantages_t, clamp_min=-20.0, clamp_max=20.0)
 
-        for _ in range(PPO_EPOCHS):
-            indices = torch.randperm(len(states))
-            for start in range(0, len(states), 64):
-                idx = indices[start : start + 64]
-                b_states = states[idx]
-                b_actions = actions[idx]
-                b_agent = agent_indices[idx]
-                b_archetype = archetype_indices[idx]
-                b_strategy = strategies[idx]
-                b_old_lp = old_log_probs[idx]
-                b_adv = advantages_t[idx]
-                b_ret = returns[idx]
+            for _ in range(PPO_EPOCHS):
+                indices = torch.randperm(len(states))
+                for start in range(0, len(states), 64):
+                    idx = indices[start : start + 64]
+                    b_states = states[idx]
+                    b_actions = actions[idx]
+                    b_agent = agent_indices[idx]
+                    b_archetype = archetype_indices[idx]
+                    b_strategy = strategies[idx]
+                    b_old_lp = old_log_probs[idx]
+                    b_adv = advantages_t[idx]
+                    b_ret = returns[idx]
 
-                action_mean, log_std, value = family.model(b_states, b_agent, b_archetype, b_strategy)
-                std = log_std.exp().clamp(min=1e-6)
-                dist = torch.distributions.Normal(action_mean, std)
-                new_lp = dist.log_prob(b_actions).sum(-1)
-                entropy = dist.entropy().sum(-1).mean()
+                    action_mean, log_std, value = family.model(b_states, b_agent, b_archetype, b_strategy)
+                    action_mean = _sanitize_tensor(action_mean, clamp_min=-ACTION_CLAMP, clamp_max=ACTION_CLAMP)
+                    log_std = _sanitize_tensor(log_std, clamp_min=LOG_STD_MIN, clamp_max=LOG_STD_MAX)
+                    value = _sanitize_tensor(value.squeeze(-1), clamp_min=-100.0, clamp_max=100.0)
+                    std = log_std.exp().clamp(min=1e-6, max=7.0)
+                    dist = torch.distributions.Normal(action_mean, std)
+                    new_lp = _sanitize_tensor(dist.log_prob(b_actions).sum(-1), clamp_min=-100.0, clamp_max=100.0)
+                    entropy = _sanitize_tensor(dist.entropy().sum(-1).mean(), clamp_min=0.0, clamp_max=100.0)
 
-                ratio = (new_lp - b_old_lp).exp()
-                surr1 = ratio * b_adv
-                surr2 = torch.clamp(ratio, 1 - CLIP_EPSILON, 1 + CLIP_EPSILON) * b_adv
-                value_loss = (b_ret - value.squeeze(-1)).pow(2).mean()
-                loss = -torch.min(surr1, surr2).mean() + VALUE_COEF * value_loss - ENTROPY_COEF * entropy
+                    ratio = _sanitize_tensor((new_lp - b_old_lp).exp(), clamp_min=0.0, clamp_max=20.0)
+                    surr1 = ratio * b_adv
+                    surr2 = torch.clamp(ratio, 1 - CLIP_EPSILON, 1 + CLIP_EPSILON) * b_adv
+                    value_loss = (b_ret - value).pow(2).mean()
+                    loss = -torch.min(surr1, surr2).mean() + VALUE_COEF * value_loss - ENTROPY_COEF * entropy
 
-                if not torch.isfinite(loss):
-                    raise RuntimeError("non-finite PPO loss")
+                    if not torch.isfinite(loss):
+                        raise RuntimeError("non-finite PPO loss")
 
-                family.optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(family.model.parameters(), 0.5)
-                family.optimizer.step()
+                    family.optimizer.zero_grad()
+                    loss.backward()
+                    for parameter in family.model.parameters():
+                        if parameter.grad is not None:
+                            parameter.grad.data = torch.nan_to_num(parameter.grad.data, nan=0.0, posinf=1.0, neginf=-1.0)
+                    nn.utils.clip_grad_norm_(family.model.parameters(), 0.5)
+                    family.optimizer.step()
+
+                    if not family.has_finite_parameters():
+                        raise RuntimeError("non-finite model parameters after optimizer step")
+        except Exception:
+            family.model.load_state_dict(snapshot)
+            family.optimizer = optim.Adam(family.model.parameters(), lr=LEARNING_RATE)
+            raise
 
         family.clear_buffer()
         family.train_steps += 1

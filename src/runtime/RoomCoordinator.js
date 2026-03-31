@@ -25,6 +25,11 @@ function cleanPublicAddress(value) {
     .replace(/^https?:\/\//, "");
 }
 
+function numberOrZero(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 class RoomCoordinator {
   constructor({ roomIndex, roster, config, runtimeState, strategicBrains, mode = "training", jobId = null, templateId = null }) {
     this.roomIndex = roomIndex;
@@ -561,14 +566,15 @@ class RoomCoordinator {
   async _finalizeMatch(connectedSessions) {
     const agentResults = [];
     for (const session of connectedSessions) {
+      const playerState = this._refreshPlayerData(session);
       const summary = {
-        score: session.bot.data?.score || 0,
-        kills: session.bot.data?.kills || 0,
-        deaths: session.bot.data?.deaths || 0,
-        damageDealt: session.bot.fitness.damageDealt || 0,
-        damageTaken: session.bot.fitness.damageTaken || 0,
-        survivalTime: session.bot.fitness.survivalTime || 0,
-        abilitiesUsed: session.bot.fitness.abilitiesUsed || 0,
+        score: numberOrZero(playerState?.score),
+        kills: numberOrZero(playerState?.kills),
+        deaths: numberOrZero(playerState?.deaths),
+        damageDealt: numberOrZero(session.bot.fitness.damageDealt),
+        damageTaken: numberOrZero(session.bot.fitness.damageTaken),
+        survivalTime: numberOrZero(session.bot.fitness.survivalTime),
+        abilitiesUsed: numberOrZero(session.bot.fitness.abilitiesUsed),
       };
 
       if (session.bot.brain) {
@@ -673,6 +679,14 @@ class RoomCoordinator {
   _buildMatchSummary(selection, connectedSessions, agentResults) {
     const startedAt = this.roomState.lastMatchStartedAt || new Date().toISOString();
     const finishedAt = new Date().toISOString();
+    const totalScore = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.score), 0);
+    const totalDamageDealt = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.damageDealt), 0);
+    const totalKills = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.kills), 0);
+    const totalDeaths = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.deaths), 0);
+    const totalInputsSent = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.inputsSent), 0);
+    const totalStateUpdates = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.stateUpdates), 0);
+    const hasCombatSignal = totalScore > 0 || totalDamageDealt > 0 || totalKills > 0 || totalDeaths > 0;
+
     return {
       roomIndex: this.roomIndex,
       mode: this.mode,
@@ -680,15 +694,31 @@ class RoomCoordinator {
       templateId: this.templateId,
       roomId: selection.roomId,
       publicAddress: cleanPublicAddress(selection.publicAddress),
+      expectedAgents: this.roster.length,
       assignedAgents: selection.sessions.length,
       connectedAgents: connectedSessions.length,
       fillRatio: +(connectedSessions.length / Math.max(this.roster.length, 1)).toFixed(3),
       startedAt,
       finishedAt,
       durationMs: Math.max(0, new Date(finishedAt).getTime() - new Date(startedAt).getTime()),
+      totalScore,
+      totalDamageDealt,
+      totalKills,
+      totalDeaths,
+      totalInputsSent,
+      totalStateUpdates,
+      hasCombatSignal,
       winner: agentResults[0] || null,
       agentResults,
     };
+  }
+
+  _refreshPlayerData(session) {
+    const playerState = session.room?.state?.players?.get?.(session.userID);
+    if (playerState) {
+      session.bot.data = playerState;
+    }
+    return session.bot.data || playerState || null;
   }
 
   _sleep(ms) {

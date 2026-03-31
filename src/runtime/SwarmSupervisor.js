@@ -323,6 +323,36 @@ class SwarmSupervisor {
   }
 
   async _runRoomBatch(roomRosters, options = {}) {
+    if ((options.mode || "training") === "evaluation") {
+      const results = [];
+      for (let roomIndex = 0; roomIndex < roomRosters.length; roomIndex++) {
+        const coordinator = new RoomCoordinator({
+          roomIndex,
+          roster: roomRosters[roomIndex],
+          config: this.config,
+          runtimeState: this.runtimeState,
+          strategicBrains: this.strategicBrains,
+          mode: options.mode || "training",
+          jobId: options.jobId || null,
+          templateId: options.templateId || null,
+        });
+
+        results.push(
+          await coordinator.runMatch().catch((err) => ({
+            connectedCount: 0,
+            error: err.message,
+            summary: null,
+          }))
+        );
+
+        if (roomIndex < roomRosters.length - 1) {
+          await this._sleep(this.config.rooms?.staggerMs || 5000);
+        }
+      }
+
+      return results;
+    }
+
     const roomPromises = [];
     for (let roomIndex = 0; roomIndex < roomRosters.length; roomIndex++) {
       const coordinator = new RoomCoordinator({

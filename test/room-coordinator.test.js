@@ -53,3 +53,37 @@ test("room coordinator classifies seat expiry and room lock join failures", () =
   assert.equal(runtimeState.counters.seatExpired, 1);
   assert.equal(runtimeState.counters.lockedRooms, 1);
 });
+
+test("room coordinator summary includes activity validity signals", () => {
+  const runtimeState = makeRuntimeState();
+  const coordinator = new RoomCoordinator({
+    roomIndex: 0,
+    roster: [{ agentId: "agent_0" }, { agentId: "agent_1" }],
+    config: { rooms: { minReadyRatio: 0.5 }, bot: {}, server: {} },
+    runtimeState,
+    strategicBrains: new Map(),
+  });
+
+  const selection = {
+    roomId: "room-a",
+    publicAddress: "https://arena.example",
+    sessions: [{ userID: "u0" }, { userID: "u1" }],
+  };
+  const connectedSessions = [{ userID: "u0" }, { userID: "u1" }];
+  const agentResults = [
+    { score: 250, kills: 2, deaths: 1, damageDealt: 300, inputsSent: 120, stateUpdates: 40 },
+    { score: 100, kills: 1, deaths: 2, damageDealt: 150, inputsSent: 118, stateUpdates: 0 },
+  ];
+
+  const summary = coordinator._buildMatchSummary(selection, connectedSessions, agentResults);
+
+  assert.equal(summary.expectedAgents, 2);
+  assert.equal(summary.connectedAgents, 2);
+  assert.equal(summary.totalScore, 350);
+  assert.equal(summary.totalDamageDealt, 450);
+  assert.equal(summary.totalKills, 3);
+  assert.equal(summary.totalDeaths, 3);
+  assert.equal(summary.totalInputsSent, 238);
+  assert.equal(summary.totalStateUpdates, 40);
+  assert.equal(summary.hasCombatSignal, true);
+});

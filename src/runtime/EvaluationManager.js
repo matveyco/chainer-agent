@@ -100,6 +100,7 @@ class EvaluationManager {
             jobId: job.id,
             templateId: template.id,
           });
+          this._assertValidRunResult(job, template, iteration, results);
           job.results.push({
             templateId: template.id,
             iteration,
@@ -273,6 +274,59 @@ class EvaluationManager {
       passed,
       recorded_at: new Date().toISOString(),
     };
+  }
+
+  _assertValidRunResult(job, template, iteration, results) {
+    if (!Array.isArray(results) || results.length !== template.rooms.length) {
+      throw new Error(
+        `evaluation ${job.id} ${template.id} iteration ${iteration}: expected ${template.rooms.length} room results, received ${Array.isArray(results) ? results.length : 0}`
+      );
+    }
+
+    const roomIds = new Set();
+
+    results.forEach((result, roomIndex) => {
+      const summary = result?.summary;
+      const expectedAgents = template.rooms[roomIndex]?.length || 0;
+      if (!summary) {
+        throw new Error(
+          `evaluation ${job.id} ${template.id} iteration ${iteration}: room ${roomIndex} did not return a summary`
+        );
+      }
+
+      if (summary.connectedAgents !== expectedAgents || summary.agentResults?.length !== expectedAgents) {
+        throw new Error(
+          `evaluation ${job.id} ${template.id} iteration ${iteration}: room ${roomIndex} incomplete (${summary.connectedAgents}/${expectedAgents})`
+        );
+      }
+
+      if (!summary.roomId) {
+        throw new Error(
+          `evaluation ${job.id} ${template.id} iteration ${iteration}: room ${roomIndex} missing room id`
+        );
+      }
+
+      if (roomIds.has(summary.roomId)) {
+        throw new Error(
+          `evaluation ${job.id} ${template.id} iteration ${iteration}: duplicate room id ${summary.roomId}`
+        );
+      }
+      roomIds.add(summary.roomId);
+
+      const hasOpponent = summary.agentResults.some((agent) => ["champion", "historical"].includes(agent.evaluationSide));
+      const hasCandidate = summary.agentResults.some((agent) => agent.evaluationSide === "candidate");
+      if (!hasCandidate || !hasOpponent) {
+        throw new Error(
+          `evaluation ${job.id} ${template.id} iteration ${iteration}: room ${roomIndex} missing candidate/opponent sides`
+        );
+      }
+
+      if (!summary.hasCombatSignal) {
+        throw new Error(
+          `evaluation ${job.id} ${template.id} iteration ${iteration}: room ${roomIndex} produced no combat or score signal`
+        );
+      }
+    });
   }
 
   _load() {
