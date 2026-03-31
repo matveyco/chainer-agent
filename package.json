@@ -16,7 +16,7 @@
   "dependencies": {
     "blessed": "^0.1.81",
     "blessed-contrib": "^4.11.0",
-    "colyseus.js": "^0.15.25",
+    "colyseus.js": "0.15.28",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "long": "^5.2.3",

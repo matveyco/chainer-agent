@@ -3,7 +3,7 @@
     "roomName": "TimeLimited",
     "mapName": "arena",
     "weaponType": "rocket",
-    "colyseusVersion": "0.15.25"
+    "colyseusVersion": "0.15.28"
   },
   "rooms": {
     "count": 2,
