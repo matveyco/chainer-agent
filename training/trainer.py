@@ -332,7 +332,7 @@ class PPOTrainer:
             actor, dummy, str(onnx_path),
             input_names=["state"], output_names=["action"],
             dynamic_axes={"state": {0: "batch"}, "action": {0: "batch"}},
-            opset_version=14,
+            opset_version=18,
         )
 
         # Force inline weights
@@ -375,10 +375,7 @@ class PPOTrainer:
         agent.best_score = ckpt.get("best_score", 0)
         agent.score_history = ckpt.get("score_history", [])
         agent.kd_history = ckpt.get("kd_history", [])
-        try:
-            self._export_onnx(agent_id)
-        except Exception as e:
-            print(f"[Trainer] ONNX export failed for loaded {agent_id}: {e}")
+        # Skip ONNX export on load — export lazily when model is first requested
         print(f"[Trainer] Loaded {agent_id} (v{agent.model_version}, {agent.total_episodes} ep)")
         return True
 
@@ -528,8 +525,11 @@ def create_app(trainer: PPOTrainer):
     def get_model(agent_id):
         model_path = MODELS_DIR / f"{agent_id}.onnx"
         if not model_path.exists():
-            trainer.get_or_create_agent(agent_id)
-            model_path = MODELS_DIR / f"{agent_id}.onnx"
+            agent = trainer.get_or_create_agent(agent_id)
+            try:
+                trainer._export_onnx(agent_id)
+            except Exception as e:
+                return jsonify({"error": f"Export failed: {e}"}), 503
         if not model_path.exists():
             return jsonify({"error": "Model not ready"}), 503
         return send_file(str(model_path.resolve()), mimetype="application/octet-stream")
