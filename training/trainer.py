@@ -43,7 +43,9 @@ PPO_EPOCHS = 4
 MODELS_DIR = Path("models")
 LOGS_DIR = Path("training_logs")
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Force CPU — our models are tiny (20K params), training takes <10ms per batch.
+# CPU avoids ALL CUDA inplace/device/HPU backend crashes.
+DEVICE = torch.device("cpu")
 
 
 # ── Neural Network ──────────────────────────────────────────────────────
@@ -79,8 +81,7 @@ class ActorOnly(nn.Module):
 class Agent:
     def __init__(self, agent_id: str):
         self.agent_id = agent_id
-        self.model = ActorCritic().to(DEVICE)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE)
+        self.model = ActorCritic()        self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE)
         self.states, self.actions, self.rewards = [], [], []
         self.values, self.log_probs, self.dones = [], [], []
         self.total_episodes = 0
@@ -161,9 +162,7 @@ class PPOTrainer:
         self.errors = 0
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"[Trainer] Device: {DEVICE}")
-        if DEVICE.type == "cuda":
-            print(f"[Trainer] GPU: {torch.cuda.get_device_name(0)}")
+        print(f"[Trainer] Device: {DEVICE} (CPU training — stable, no CUDA crashes)")
 
     def get_or_create_agent(self, agent_id: str) -> Agent:
         with self.lock:
@@ -201,9 +200,7 @@ class PPOTrainer:
                 done = 1.0 if t.get("done") else 0.0
 
                 # Compute value and log_prob on same device as model
-                state_t = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
-                action_t = torch.FloatTensor(action).unsqueeze(0).to(DEVICE)
-
+                state_t = torch.FloatTensor(state).unsqueeze(0)                action_t = torch.FloatTensor(action).unsqueeze(0)
                 with torch.no_grad():
                     action_mean, log_std, value = agent.model(state_t)
                     std = log_std.exp().clamp(min=1e-6)
@@ -234,11 +231,7 @@ class PPOTrainer:
                 self._train(agent_id)
             except Exception as e:
                 print(f"[Trainer] Training failed for {agent_id}: {e}")
-                traceback.print_exc()
                 agent.clear_buffer()
-                # Try to recover CUDA state
-                if DEVICE.type == "cuda":
-                    torch.cuda.synchronize()
 
         return accepted
 
@@ -247,10 +240,7 @@ class PPOTrainer:
         agent = self.agents[agent_id]
         t0 = time.time()
 
-        states = torch.FloatTensor(np.array(agent.states)).to(DEVICE)
-        actions = torch.FloatTensor(np.array(agent.actions)).to(DEVICE)
-        old_log_probs = torch.FloatTensor(agent.log_probs).to(DEVICE)
-        rewards = list(agent.rewards)
+        states = torch.FloatTensor(np.array(agent.states))        actions = torch.FloatTensor(np.array(agent.actions))        old_log_probs = torch.FloatTensor(agent.log_probs)        rewards = list(agent.rewards)
         values = list(agent.values)
         dones = list(agent.dones)
 
@@ -263,13 +253,11 @@ class PPOTrainer:
             gae = delta + GAMMA * GAE_LAMBDA * (1 - dones[t]) * gae
             advantages[t] = gae
 
-        advantages = torch.FloatTensor(advantages).to(DEVICE)
-        returns = advantages + torch.FloatTensor(values).to(DEVICE)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = torch.FloatTensor(advantages)        returns = advantages + torch.FloatTensor(values)        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # PPO update
         for epoch in range(PPO_EPOCHS):
-            indices = torch.randperm(len(states), device=DEVICE)
+            indices = torch.randperm(len(states))
             for start in range(0, len(states), 64):
                 idx = indices[start:start + 64]
                 b_states = states[idx]
@@ -279,25 +267,23 @@ class PPOTrainer:
                 b_ret = returns[idx]
 
                 action_mean, log_std, value = agent.model(b_states)
-                # Clone to break inplace graph dependency
-                std = (log_std + 0).exp().clamp(min=1e-6)  # +0 creates new tensor
-                dist = torch.distributions.Normal(action_mean + 0, std)
+                std = log_std.exp().clamp(min=1e-6)
+                dist = torch.distributions.Normal(action_mean, std)
                 new_lp = dist.log_prob(b_actions).sum(-1)
                 entropy = dist.entropy().sum(-1).mean()
 
                 ratio = (new_lp - b_old_lp).exp()
                 surr1 = ratio * b_adv
                 surr2 = torch.clamp(ratio, 1 - CLIP_EPSILON, 1 + CLIP_EPSILON) * b_adv
-                value_pred = (value + 0).reshape(-1)
                 loss = (
                     -torch.min(surr1, surr2).mean()
-                    + VALUE_COEF * (b_ret - value_pred).pow(2).mean()
+                    + VALUE_COEF * (b_ret - value.squeeze(-1)).pow(2).mean()
                     - ENTROPY_COEF * entropy
                 )
 
                 agent.optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_value_(agent.model.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(agent.model.parameters(), 0.5)
                 agent.optimizer.step()
 
         agent.clear_buffer()
@@ -322,9 +308,8 @@ class PPOTrainer:
 
     def _export_onnx(self, agent_id: str):
         agent = self.agents[agent_id]
-        # Create a separate copy on CPU for export (don't move the training model)
         import copy
-        actor = ActorOnly(copy.deepcopy(agent.model).cpu())
+        actor = ActorOnly(copy.deepcopy(agent.model))
         actor.eval()
         dummy = torch.randn(1, STATE_DIM)
         onnx_path = MODELS_DIR / f"{agent_id}.onnx"
@@ -471,12 +456,12 @@ class PPOTrainer:
 
     def get_system_info(self):
         uptime = time.time() - self.start_time
-        gpu_info = "N/A"
-        if DEVICE.type == "cuda":
-            try:
-                gpu_info = torch.cuda.get_device_name(0)
-            except:
-                gpu_info = "CUDA (unknown)"
+        gpu_info = "CPU (20K param models — fast enough)"
+        try:
+            if torch.cuda.is_available():
+                gpu_info = f"CPU training, GPU available: {torch.cuda.get_device_name(0)}"
+        except:
+            pass
         return {
             "device": str(DEVICE),
             "gpu": gpu_info,

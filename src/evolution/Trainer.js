@@ -176,32 +176,31 @@ class Trainer {
       throw new Error(`Room ${roomIndex}: assignment timeout`);
     }
 
-    logger.info(`Room ${roomIndex}: ${roomData.roomId} (${agentIds.length} agents)`);
-
-    // Phase 3: Connect
-    const host = roomData.publicAddress.replace(/^https?:\/\//, "");
+    // Clean publicAddress (server sometimes returns quotes/whitespace)
+    const host = roomData.publicAddress
+      .replace(/["']/g, "")
+      .replace(/\s/g, "")
+      .replace(/^https?:\/\//, "");
     const clientUrl = `https://${host}`;
+    logger.info(`Room ${roomIndex}: ${roomData.roomId} @ ${host} (${agentIds.length} agents)`);
 
+    // Phase 3: Connect ALL bots in PARALLEL (not sequential — seats expire fast!)
     let matchEnded = false;
     const matchEndPromise = new Promise((resolve) => {
       const onDispose = () => { if (!matchEnded) { matchEnded = true; resolve(); } };
 
       (async () => {
-        for (let i = 0; i < bots.length; i++) {
-          if (matchEnded || !this.running) break;
-          const bot = bots[i];
+        const joinOptions = { weaponType: this.config.server.weaponType };
+        if (this.config.server.authKey) joinOptions.OAuthAPIKey = this.config.server.authKey;
 
+        // Join ALL bots at once — no waiting between them
+        const joinPromises = bots.map(async (bot, i) => {
           try {
             const client = new Client(clientUrl);
-            const joinOptions = {
+            const room = await client.joinById(roomData.roomId, {
+              ...joinOptions,
               userID: userIDs[i],
-              weaponType: this.config.server.weaponType,
-            };
-            // Add auth key if configured
-            if (this.config.server.authKey) {
-              joinOptions.OAuthAPIKey = this.config.server.authKey;
-            }
-            const room = await client.joinById(roomData.roomId, joinOptions);
+            });
 
             bot.room = room;
             bot.gameState = gameState;
@@ -212,15 +211,35 @@ class Trainer {
             });
 
             await bot.initBrain(this.config.trainerUrl);
-            setTimeout(() => {
-              if (!bot.data) bot.data = room.state?.players?.get?.(userIDs[i]);
-              bot.connected = true;
-            }, 500);
+            bot.data = room.state?.players?.get?.(userIDs[i]);
+            bot.connected = true;
+            return true;
           } catch (err) {
-            logger.warn(`Room ${roomIndex} bot ${i} join failed: ${err.message}`);
+            logger.warn(`Room ${roomIndex} bot ${i} failed: ${err.message}`);
+            return false;
           }
+        });
 
-          await this._sleep(this.config.bot.clientStaggerMs);
+        const results = await Promise.all(joinPromises);
+        const connected = results.filter(Boolean).length;
+        logger.info(`Room ${roomIndex}: ${connected}/${bots.length} bots connected`);
+
+        // If less than half connected, abandon this room
+        if (connected < Math.floor(bots.length / 2)) {
+          logger.warn(`Room ${roomIndex}: too few bots (${connected}), abandoning`);
+          for (const bot of bots) {
+            try { if (bot.room) { bot.room.leave(); bot.room.removeAllListeners(); } } catch {}
+          }
+          if (!matchEnded) { matchEnded = true; resolve(); }
+          return;
+        }
+
+        // Give bots a moment to get player data
+        await this._sleep(1000);
+        for (const bot of bots) {
+          if (bot.connected && !bot.data && bot.room) {
+            bot.data = bot.room.state?.players?.get?.(bot.userID);
+          }
         }
       })();
 
