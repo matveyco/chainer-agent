@@ -65,6 +65,22 @@ class Trainer {
       return;
     }
 
+    // Initialize strategic brains for ALL agents at startup
+    // so dashboard shows profiles immediately
+    if (this.config.ollamaApiKey) {
+      const { StrategicBrain } = require("../bot/StrategicBrain");
+      for (const agentId of this.allAgentIds) {
+        if (!this.strategicBrains.has(agentId)) {
+          this.strategicBrains.set(
+            agentId,
+            new StrategicBrain(agentId, this.config.ollamaApiKey, this.config.ollamaModel)
+          );
+        }
+      }
+      this._saveProfiles();
+      logger.info(`Initialized ${this.strategicBrains.size} strategic brains with LLM`);
+    }
+
     logger.info("Starting 24/7 training loop...");
 
     // Run rooms in parallel, forever
@@ -115,7 +131,12 @@ class Trainer {
     for (let i = 0; i < agentIds.length; i++) {
       const userID = `${agentIds[i]}_${generateID(4)}`;
       userIDs.push(userID);
-      bots.push(new SmartBot(userID, null, this.config, agentIds[i]));
+      const bot = new SmartBot(userID, null, this.config, agentIds[i]);
+      // Reuse persistent strategic brain (not a fresh one)
+      if (this.strategicBrains.has(agentIds[i])) {
+        bot.strategicBrain = this.strategicBrains.get(agentIds[i]);
+      }
+      bots.push(bot);
     }
 
     // Phase 1: Queue

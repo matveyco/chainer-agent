@@ -1,67 +1,117 @@
 # Chainer Agent
 
-Self-learning AI bots for the [chainer.io](https://chainer.io) 3rd-person multiplayer shooter arena. Bots evolve their neural networks through **NEAT (NeuroEvolution of Augmenting Topologies)** — they fight each other, and the best performers breed the next generation. Over time, each bot develops its own unique strategy to maximize kills, collect crystals, and climb the leaderboard.
+Self-learning AI bots for the [chainer.io](https://chainer.io) 3rd-person multiplayer shooter arena. Each agent has a unique personality, its own neural network, and an LLM strategic brain — they fight, learn, and evolve.
 
-Inspired by [Karpathy's AutoResearch](https://github.com/karpathy/autoresearch) — clear fitness metric, time-boxed evaluation cycles, autonomous improvement loop.
+## Architecture: Two-Layer Brain
 
----
-
-## How It Works
+Each agent has **two brain layers** working together:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                      EVOLUTION LOOP                           │
-│                                                               │
-│   1. Create population of N neural networks (gen 0: random)   │
-│   2. Connect N bots to game server via Colyseus WebSocket     │
-│   3. Each bot uses its own neural network for 60Hz decisions   │
-│   4. Match plays out — bots fight, shoot, collect crystals     │
-│   5. Collect fitness: kills, accuracy, survival, damage        │
-│   6. Natural selection: best performers survive                │
-│   7. Crossover + mutation → new generation                     │
-│   8. Save best genomes to disk                                 │
-│   9. Repeat forever — each generation gets smarter             │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    AGENT BRAIN                               │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  LAYER 2: LLM Strategic Brain (kimi-k2.5)            │   │
+│  │  Runs: every 3 matches (between matches)             │   │
+│  │  Does: analyzes performance, adjusts strategy,        │   │
+│  │        formulates plans, reflects on mistakes         │   │
+│  │  Output: strategy parameters that OVERRIDE Layer 1    │   │
+│  └────────────────────────┬─────────────────────────────┘   │
+│                           │ strategy overrides               │
+│  ┌────────────────────────▼─────────────────────────────┐   │
+│  │  LAYER 1: Neural Network (PPO on GPU)                 │   │
+│  │  Runs: 60Hz (every frame)                             │   │
+│  │  Does: raw movement, aiming, shooting decisions       │   │
+│  │  Trained: continuously via PyTorch on GPU             │   │
+│  └──────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-Each bot has its **own neural network brain** (14 inputs → 6 outputs). NEAT evolves both the network weights AND topology — starting from simple direct connections and growing hidden layers as needed. Every bot develops a unique strategy through its own evolutionary lineage.
+**Layer 1 (NN/PPO)** handles reflexes — frame-by-frame movement, aim, shoot. Trained on GPU via PyTorch, exported as ONNX models, inference in Node.js.
 
-### What Bots Learn
+**Layer 2 (LLM)** handles strategy — it OVERRIDES the NN when needed. A Hunter will force-charge enemies even if the NN says retreat. A Collector will ignore fights to gather crystals. Strategy parameters directly control behavior:
 
-| Generations | Behavior |
-|------------|----------|
-| 0-5 | Random movement, accidental kills |
-| 5-20 | Moving toward enemies, shooting more often |
-| 20-50 | Deliberate targeting, improved accuracy, arena awareness |
-| 50-100+ | Emergent strategies, ability usage, cooldown management |
+| Parameter | Low (0.0) | High (1.0) |
+|-----------|-----------|------------|
+| `aggression` | Run away from enemies | Always charge and shoot |
+| `accuracy_focus` | Spray bullets randomly | Only perfect aimed shots |
+| `crystal_priority` | Ignore crystals | Only collect crystals, avoid fights |
+| `ability_usage` | Never use abilities | Spam abilities constantly |
+| `retreat_threshold` | Fight to death (Berserker) | Retreat at 70% health (Survivor) |
 
-### Fitness Function
+## Agent Personalities
+
+Each agent gets a deterministic personality archetype that creates **drastically different playstyles**:
+
+| Agent | Archetype | Behavior |
+|-------|-----------|----------|
+| agent_0, 8, 16 | **Hunter** | Charges enemies, close combat, never retreats |
+| agent_1, 9, 17 | **Sniper** | Keeps distance, precise shots only |
+| agent_2, 10, 18 | **Collector** | Avoids fights, hoards crystals for score |
+| agent_3, 11, 19 | **Survivor** | Retreats early, outlasts everyone |
+| agent_4, 12, 20 | **Berserker** | All-in maniac, zero self-preservation |
+| agent_5, 13, 21 | **Tactician** | Balanced, adapts to situation |
+| agent_6, 14, 22 | **Flanker** | Hit-and-run, attacks from edges |
+| agent_7, 15, 23 | **Guardian** | Holds center, punishes intruders |
+
+The LLM reviews performance every 3 matches and adjusts strategy — a Survivor might become more aggressive if it's not scoring enough, or a Hunter might learn to retreat when K/D drops.
+
+## How Training Works
 
 ```
-fitness = (kills × 100) + (damage_dealt × 1) - (deaths × 50)
-        + (accuracy × 50) + (survival_time × 0.5)
+                     ┌─── Game Server (Colyseus) ───┐
+                     │  Room 1: 12 agents fighting   │
+                     │  Room 2: 12 agents fighting   │
+                     └───────────┬───────────────────┘
+                                 │ experience (state, action, reward)
+                     ┌───────────▼───────────────────┐
+                     │  PyTorch Trainer (GPU)          │
+                     │  24 individual PPO networks     │
+                     │  → ONNX export after training   │
+                     └───────────┬───────────────────┘
+                                 │ ONNX models
+                     ┌───────────▼───────────────────┐
+                     │  Node.js Bot Swarm              │
+                     │  onnxruntime-node inference     │
+                     │  + LLM strategic overrides      │
+                     └───────────────────────────────┘
+                                 │
+              every 10 matches:  │  NATURAL SELECTION
+              ┌──────────────────▼──────────────────┐
+              │  Bottom 5 agents → deleted            │
+              │  Top 5 agents → cloned + mutated     │
+              │  (2% weight noise on clone)           │
+              └──────────────────────────────────────┘
 ```
 
----
+1. **24 agents** play in 2 parallel rooms (12 per room)
+2. Each agent collects experience (state, action, reward) every frame
+3. Experience is sent to **PyTorch trainer on GPU** for PPO updates
+4. Updated models exported as ONNX and loaded by bots in real-time
+5. Every 3 matches, the **LLM** analyzes performance and adjusts strategy
+6. Every 10 matches, **natural selection**: weakest 5 die, strongest 5 cloned with mutations
+7. Runs **24/7** with auto-restart
 
 ## Tech Stack
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| Neuroevolution | [neataptic](https://github.com/wagenaartje/neataptic) | NEAT — evolves NN weights + topology |
-| Game Client | [colyseus.js](https://github.com/colyseus/colyseus.js) v0.15 | WebSocket multiplayer (same protocol as real players) |
-| Message Protocol | [protobufjs](https://github.com/protobufjs/protobuf.js) + long | Binary protobuf for movement/shoot messages |
-| Spatial Queries | SpatialHashFast | Fast nearest-enemy lookup via spatial hashing |
-| Terminal UI | [blessed](https://github.com/chjj/blessed) + [blessed-contrib](https://github.com/yaronn/blessed-contrib) | Real-time training dashboard |
-
----
+| NN Training | **PyTorch** (GPU, CUDA) | PPO per-agent policy networks |
+| NN Inference | **onnxruntime-node** | Fast ONNX inference in Node.js |
+| Strategic Brain | **kimi-k2.5** via Ollama Cloud | LLM strategy analysis + planning |
+| Game Client | **colyseus.js** v0.15 | WebSocket multiplayer (same as real players) |
+| Protocol | **protobufjs** | Binary movement/shoot messages |
+| Dashboard | **Express** + vanilla JS | Real-time web UI at port 3000 |
+| Deployment | **systemd** / auto-restart scripts | 24/7 operation |
 
 ## Setup
 
 ### Prerequisites
 
 - **Node.js 18+**
+- **Python 3.10+** with PyTorch
 - A running chainer.io game server
+- Ollama Cloud API key (for LLM brain)
 
 ### Install
 
@@ -69,11 +119,14 @@ fitness = (kills × 100) + (damage_dealt × 1) - (deaths × 50)
 git clone https://github.com/matveyco/chainer-agent.git
 cd chainer-agent
 npm install
+
+# Python training service
+python3 -m venv venv
+source venv/bin/activate
+pip install torch numpy onnx onnxscript flask
 ```
 
 ### Configure
-
-Copy the example environment file and set your game server URL:
 
 ```bash
 cp .env.example .env
@@ -83,192 +136,90 @@ Edit `.env`:
 
 ```env
 GAME_SERVER_URL=https://your-game-server.com
-POPULATION_SIZE=15
+TRAINER_URL=http://localhost:5555
+POPULATION_SIZE=12
+NUM_ROOMS=2
 MATCH_TIMEOUT=120000
+SELECTION_INTERVAL=10
+NUM_CULL=5
+OLLAMA_CLOUD_API_KEY=your-ollama-api-key
+DEEP_ANALYSIS_MODEL=kimi-k2.5:cloud
+NODE_TLS_REJECT_UNAUTHORIZED=0
 ```
 
-See `.env.example` for all available options.
-
----
-
-## Usage
-
-### Train (Evolution Loop)
+### Run
 
 ```bash
-# Start fresh training
-npm start
+# Option 1: 24/7 mode (manages all services)
+nohup bash deploy/run-forever.sh > runner.log 2>&1 &
 
-# Override settings via CLI
-node src/index.js --population 20
-node src/index.js --endpoint https://other-server.com
+# Option 2: Manual (3 terminals)
+source venv/bin/activate && python training/trainer.py   # Terminal 1: GPU trainer
+node src/index.js                                         # Terminal 2: Bot swarm
+node web/server.js                                        # Terminal 3: Dashboard
 ```
 
-The terminal dashboard shows real-time progress:
+### Dashboard
 
-```
-╔══════════════════════════════════════════════════════════╗
-║  GEN: 47    BOTS: 15   TIME: 2h14m                     ║
-╠══════════════════════════════════════════════════════════╣
-║  Best Fitness:  1646.5     Avg: 535.4                   ║
-║  Best K/D:      3.0        Avg K/D: 1.21                ║
-║  Accuracy:      42%        Kills: 31                    ║
-║  Neurons:       20-21                                   ║
-╚══════════════════════════════════════════════════════════╝
-```
+Open `http://your-server:3000` in a browser:
+- **Leaderboard** — all agents ranked by score, K/D, model version
+- **Agent Detail** — click any agent to see personality, strategy bars, LLM thoughts, score trends
+- **Controls** — trigger natural selection, clone agents, reset agents
 
-### Resume Training
-
-```bash
-node src/index.js --resume          # Resume from latest snapshot
-node src/index.js --resume 50       # Resume from generation 50
-```
-
-### Watch Best Bot
-
-```bash
-node src/index.js --watch                        # Watch latest best genome
-node src/index.js --watch data/best/gen_50.json   # Watch specific genome
-```
-
-### Test Connection
-
-```bash
-node src/index.js --test-connect
-```
-
----
-
-## Architecture
+## Project Structure
 
 ```
 chainer-agent/
 ├── src/
-│   ├── index.js                  # Entry point — CLI, training/watch/test modes
+│   ├── index.js                  # Entry point
 │   ├── bot/
-│   │   ├── SmartBot.js           # Neural net-driven bot (60Hz game loop)
-│   │   ├── BotBrain.js           # NN inference wrapper (input → action mapping)
-│   │   └── StateExtractor.js     # Game state → 14-element normalized input vector
+│   │   ├── SmartBot.js           # Bot with dual-brain architecture
+│   │   ├── AgentBrain.js         # ONNX inference (NN layer)
+│   │   ├── StrategicBrain.js     # LLM strategy (overrides NN)
+│   │   └── StateExtractor.js     # Game state → 18-dim input vector
 │   ├── evolution/
-│   │   ├── Population.js         # NEAT population (wraps neataptic)
-│   │   ├── Genome.js             # Save/load neural network genomes as JSON
-│   │   └── Trainer.js            # Evolution loop orchestrator
-│   ├── network/
-│   │   ├── Connection.js         # Colyseus client + room join + handlers
-│   │   ├── Protocol.js           # Protobuf encoding (InputMessage, ShootMessage)
-│   │   └── Matchmaker.js         # HTTP matchmaking client
-│   ├── game/
-│   │   ├── SpatialGrid.js        # 2D spatial hash for proximity queries
-│   │   ├── GameState.js          # Player positions, health, state tracking
-│   │   └── Deserializer.js       # Binary state snapshot deserialization
-│   ├── metrics/
-│   │   ├── FitnessTracker.js     # Per-bot K/D, damage, accuracy tracking
-│   │   ├── GenerationLog.js      # Generation stats aggregation + JSONL logging
-│   │   └── Dashboard.js          # Terminal dashboard (blessed)
-│   └── utils/
-│       ├── math.js               # 3D vector math
-│       └── logger.js             # Structured logging
-├── config/
-│   └── default.json              # Default evolution/fitness/bot parameters
-├── protobuf/
-│   └── types.json                # Protobuf message definitions
-├── data/                         # Created at runtime (gitignored)
-│   ├── generations/              # Full population snapshots (every 10 gens)
-│   ├── best/                     # Best genome per generation
-│   └── logs/                     # Training logs (JSONL)
-├── .env.example                  # Environment config template
-└── package.json
+│   │   ├── Trainer.js            # 24/7 training loop, 2 rooms, selection
+│   │   ├── Population.js         # NEAT population (legacy, kept for compat)
+│   │   └── Genome.js             # Model persistence
+│   ├── network/                  # Colyseus + protobuf + matchmaking
+│   ├── game/                     # SpatialGrid, state deserialization
+│   └── metrics/                  # Fitness tracking, generation logging
+├── training/
+│   └── trainer.py                # PyTorch PPO service (GPU)
+├── web/
+│   ├── server.js                 # Dashboard Express server
+│   └── public/index.html         # Dashboard UI
+├── deploy/
+│   └── run-forever.sh            # 24/7 runner with auto-restart
+├── config/default.json           # Default parameters
+└── .env.example                  # Environment config template
 ```
 
-### Neural Network I/O
+## API Endpoints
 
-**14 Inputs (what the bot perceives):**
+### Python Trainer (port 5555)
 
-| # | Input | Description |
-|---|-------|-------------|
-| 0 | Health | Own health (0-1) |
-| 1-2 | Position | Own X, Z in arena |
-| 3 | Enemy distance | Distance to nearest enemy |
-| 4-5 | Enemy angle | Sin/cos angle to nearest enemy |
-| 6 | Enemy health | Nearest enemy health |
-| 7 | Enemy count | Nearby enemy count |
-| 8 | Center distance | Distance from arena center |
-| 9 | Cooldown | Weapon on cooldown? |
-| 10-11 | Velocity | Current movement direction |
-| 12 | Has target | Enemy in weapon range? |
-| 13 | Approach | Moving toward/away from enemy |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Service status + GPU info |
+| `/stats` | GET | All agent stats |
+| `/model/:id` | GET | Download ONNX model |
+| `/experience` | POST | Submit training experience |
+| `/select` | POST | Trigger natural selection |
+| `/agent/:id/reset` | POST | Reset agent to random |
+| `/agent/:id/clone/:src` | POST | Clone source → target |
+| `/agent/:id/history` | GET | Training log history |
 
-**6 Outputs (what the bot does):**
+### Web Dashboard (port 3000)
 
-| # | Output | Description |
-|---|--------|-------------|
-| 0-1 | Move X, Z | Movement direction |
-| 2-3 | Aim offset | Aim adjustment around target |
-| 4 | Shoot | Fire weapon (threshold > 0.5) |
-| 5 | Ability | Use ability (threshold > 0.5) |
-
----
-
-## Game Protocol
-
-Bots use the exact same Colyseus protocol as real players:
-
-1. **Matchmaking** — `POST /matchmaker/join-queue` → poll `user-queue-position` → room assigned
-2. **Join** — `client.joinById(roomId, { userID, weaponType })` via WebSocket
-3. **Play** — send `room:player:input` (protobuf) + `room:player:shoot` (protobuf) at 60Hz
-4. **Events** — receive `room:player:die`, `room:player:hit`, `room:state:update`
-
-From the game server's perspective, bots are indistinguishable from human players.
-
----
-
-## Configuration
-
-### Environment Variables (`.env`)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GAME_SERVER_URL` | *required* | Game server base URL |
-| `ROOM_NAME` | `TimeLimited` | Room type to join |
-| `MAP_NAME` | `arena` | Map name |
-| `WEAPON_TYPE` | `rocket` | Bot weapon |
-| `POPULATION_SIZE` | `15` | Bots per generation |
-| `MATCH_TIMEOUT` | `120000` | Max match duration (ms) |
-| `NODE_TLS_REJECT_UNAUTHORIZED` | — | Set to `0` for dev/staging servers |
-| `NO_DASHBOARD` | — | Set to `1` to disable TUI, use console |
-| `DEBUG` | — | Enable debug logging |
-
-### Config File (`config/default.json`)
-
-Evolution parameters, fitness weights, and bot behavior are configured in `config/default.json`. These provide sensible defaults that can be tuned as training progresses.
-
----
-
-## Persistence
-
-| File | Content | Frequency |
-|------|---------|-----------|
-| `data/best/gen_N.json` | Best genome (neural network) | Every generation |
-| `data/generations/gen_N.json` | Full population snapshot | Every 10 generations |
-| `data/logs/training.jsonl` | Generation stats | Every generation |
-
-Genomes are JSON-serialized neataptic Networks. Load one programmatically:
-
-```javascript
-const { Network } = require("neataptic");
-const genome = require("./data/best/gen_50.json");
-const network = Network.fromJSON(genome);
-const actions = network.activate(inputVector); // 14 inputs → 6 outputs
-```
-
----
+Proxies to trainer API at `/api/*` and serves the dashboard UI.
 
 ## References
 
-- [NEAT paper](http://nn.cs.utexas.edu/downloads/papers/stanley.ec02.pdf) — Stanley & Miikkulainen, 2002
-- [neataptic](https://github.com/wagenaartje/neataptic) — NEAT for JavaScript
-- [Karpathy's AutoResearch](https://github.com/karpathy/autoresearch) — Self-improving experiment loops
+- [PPO (Schulman et al., 2017)](https://arxiv.org/abs/1707.06347) — Proximal Policy Optimization
+- [Karpathy's AutoResearch](https://github.com/karpathy/autoresearch) — Self-improving loops
 - [Colyseus](https://colyseus.io) — Multiplayer game framework
+- [ONNX Runtime](https://onnxruntime.ai) — Cross-platform ML inference
 - [chainer.io](https://chainer.io) — The game
 
 ## License

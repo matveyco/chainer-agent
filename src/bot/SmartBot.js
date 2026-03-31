@@ -178,13 +178,17 @@ class SmartBot {
     if (!decision || this.matchEnded) return;
 
     // Apply LLM strategic layer on top of NN reflexes
+    // This HARD-OVERRIDES NN decisions based on agent personality + LLM strategy
     if (this.strategicBrain) {
       const gameContext = {
         hasEnemy: !!this.closestEnemy,
+        enemyDistance: this.closestEnemy?.distance || 999,
         healthPercent: (this.data?.health || 100) / 100,
         score: this.data?.score || 0,
         kills: this.data?.kills || 0,
         deaths: this.data?.deaths || 0,
+        posX: this.positionArray[0] / 60, // Normalized position
+        posZ: this.positionArray[2] / 60,
       };
       decision = this.strategicBrain.modifyAction(decision, gameContext);
     }
