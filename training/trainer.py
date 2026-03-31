@@ -279,15 +279,16 @@ class PPOTrainer:
                 b_ret = returns[idx]
 
                 action_mean, log_std, value = agent.model(b_states)
-                std = log_std.exp().clamp(min=1e-6)
-                dist = torch.distributions.Normal(action_mean, std)
+                # Clone to break inplace graph dependency
+                std = (log_std + 0).exp().clamp(min=1e-6)  # +0 creates new tensor
+                dist = torch.distributions.Normal(action_mean + 0, std)
                 new_lp = dist.log_prob(b_actions).sum(-1)
                 entropy = dist.entropy().sum(-1).mean()
 
                 ratio = (new_lp - b_old_lp).exp()
                 surr1 = ratio * b_adv
                 surr2 = torch.clamp(ratio, 1 - CLIP_EPSILON, 1 + CLIP_EPSILON) * b_adv
-                value_pred = value.reshape(-1)  # avoid inplace squeeze
+                value_pred = (value + 0).reshape(-1)
                 loss = (
                     -torch.min(surr1, surr2).mean()
                     + VALUE_COEF * (b_ret - value_pred).pow(2).mean()
@@ -296,10 +297,7 @@ class PPOTrainer:
 
                 agent.optimizer.zero_grad()
                 loss.backward()
-                # Manual grad clipping (avoids linalg_vector_norm issue on some backends)
-                for p in agent.model.parameters():
-                    if p.grad is not None:
-                        p.grad.data.clamp_(-0.5, 0.5)
+                torch.nn.utils.clip_grad_value_(agent.model.parameters(), 0.5)
                 agent.optimizer.step()
 
         agent.clear_buffer()
