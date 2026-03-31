@@ -287,15 +287,19 @@ class PPOTrainer:
                 ratio = (new_lp - b_old_lp).exp()
                 surr1 = ratio * b_adv
                 surr2 = torch.clamp(ratio, 1 - CLIP_EPSILON, 1 + CLIP_EPSILON) * b_adv
+                value_pred = value.reshape(-1)  # avoid inplace squeeze
                 loss = (
                     -torch.min(surr1, surr2).mean()
-                    + VALUE_COEF * (b_ret - value.squeeze()).pow(2).mean()
+                    + VALUE_COEF * (b_ret - value_pred).pow(2).mean()
                     - ENTROPY_COEF * entropy
                 )
 
                 agent.optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(agent.model.parameters(), 0.5)
+                # Manual grad clipping (avoids linalg_vector_norm issue on some backends)
+                for p in agent.model.parameters():
+                    if p.grad is not None:
+                        p.grad.data.clamp_(-0.5, 0.5)
                 agent.optimizer.step()
 
         agent.clear_buffer()
