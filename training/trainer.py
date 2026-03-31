@@ -100,6 +100,10 @@ def _strategy_vector(raw, archetype_id=DEFAULT_ARCHETYPE_ID) -> list[float]:
     return [strategy[key] for key in STRATEGY_KEYS]
 
 
+def _normalize_version(version_like) -> str:
+    return str(version_like).split("+", maxsplit=1)[0]
+
+
 def _safe_mean(values):
     return float(np.mean(values)) if values else 0.0
 
@@ -396,15 +400,15 @@ class PPOTrainer:
         for package_name, expected in required.items():
             module = __import__(package_name)
             actual = getattr(module, "__version__", "unknown")
-            if str(actual) != expected:
+            if _normalize_version(actual) != expected:
                 raise RuntimeError(f"{package_name} version mismatch: expected {expected}, found {actual}")
 
         import onnx  # pylint: disable=import-outside-toplevel
         import onnxscript  # pylint: disable=import-outside-toplevel
 
-        if str(onnx.__version__) != "1.21.0":
+        if _normalize_version(onnx.__version__) != "1.21.0":
             raise RuntimeError(f"onnx version mismatch: expected 1.21.0, found {onnx.__version__}")
-        if str(onnxscript.__version__) != "0.6.2":
+        if _normalize_version(onnxscript.__version__) != "0.6.2":
             raise RuntimeError(f"onnxscript version mismatch: expected 0.6.2, found {onnxscript.__version__}")
 
     # Path helpers
