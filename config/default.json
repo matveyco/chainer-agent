@@ -8,6 +8,7 @@
   "rooms": {
     "count": 2,
     "agentsPerRoom": 12,
+    "parallelTrainingBatches": false,
     "staggerMs": 5000,
     "assignmentPollMs": 1500,
     "assignmentTimeoutMs": 90000,

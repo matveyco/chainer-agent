@@ -332,7 +332,10 @@ class SwarmSupervisor {
   }
 
   async _runRoomBatch(roomRosters, options = {}) {
-    if ((options.mode || "training") === "evaluation") {
+    const mode = options.mode || "training";
+    const runSerially = mode === "evaluation" || this.config.rooms?.parallelTrainingBatches === false;
+
+    if (runSerially) {
       const results = [];
       for (let roomIndex = 0; roomIndex < roomRosters.length; roomIndex++) {
         const coordinator = new RoomCoordinator({
@@ -341,7 +344,7 @@ class SwarmSupervisor {
           config: this.config,
           runtimeState: this.runtimeState,
           strategicBrains: this.strategicBrains,
-          mode: options.mode || "training",
+          mode,
           jobId: options.jobId || null,
           templateId: options.templateId || null,
         });
