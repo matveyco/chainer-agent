@@ -31,6 +31,9 @@ function applyEnvOverrides(config, env = process.env) {
   if (env.EVALUATION_PROMOTION_MARGIN) next.evaluation.promotionMargin = parseFloat(env.EVALUATION_PROMOTION_MARGIN);
   if (env.EVALUATION_MIN_WIN_RATE) next.evaluation.minWinRate = parseFloat(env.EVALUATION_MIN_WIN_RATE);
   if (env.SUPERVISOR_PORT) next.runtime.port = parseInt(env.SUPERVISOR_PORT, 10);
+  if (env.COMBAT_RECOVERY_WINDOW) next.runtime.combatRecoveryWindow = parseInt(env.COMBAT_RECOVERY_WINDOW, 10);
+  if (env.COMBAT_RECOVERY_MIN_SIGNAL_RATIO) next.runtime.combatRecoveryMinSignalRatio = parseFloat(env.COMBAT_RECOVERY_MIN_SIGNAL_RATIO);
+  if (env.COMBAT_RECOVERY_COOLDOWN_MS) next.runtime.combatRecoveryCooldownMs = parseInt(env.COMBAT_RECOVERY_COOLDOWN_MS, 10);
   if (env.BOT_ROSTER_PATH) next.persistence.rosterFile = env.BOT_ROSTER_PATH;
   if (env.OAUTH_API_KEY) next.server.authKey = env.OAUTH_API_KEY;
   if (env.OLLAMA_CLOUD_API_KEY) next.ollamaApiKey = env.OLLAMA_CLOUD_API_KEY;
@@ -102,13 +105,13 @@ function validateEnvContract(config, env = process.env) {
     }
   }
 
-  for (const key of ["EVALUATION_SAMPLE_MATCHES"]) {
+  for (const key of ["EVALUATION_SAMPLE_MATCHES", "COMBAT_RECOVERY_WINDOW", "COMBAT_RECOVERY_COOLDOWN_MS"]) {
     if (env[key] && !Number.isFinite(parseInt(env[key], 10))) {
       errors.push(`${key} must be numeric`);
     }
   }
 
-  for (const key of ["EVALUATION_PROMOTION_MARGIN", "EVALUATION_MIN_WIN_RATE"]) {
+  for (const key of ["EVALUATION_PROMOTION_MARGIN", "EVALUATION_MIN_WIN_RATE", "COMBAT_RECOVERY_MIN_SIGNAL_RATIO"]) {
     if (env[key] && !Number.isFinite(parseFloat(env[key]))) {
       errors.push(`${key} must be numeric`);
     }

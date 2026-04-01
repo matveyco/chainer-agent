@@ -413,6 +413,29 @@ class PPOTrainer:
         self.export_thread.start()
         print(f"[Trainer] Device: {DEVICE} (shared conditioned CPU training)")
 
+    def _load_family_checkpoint_payload(self, checkpoint_path: Path) -> dict:
+        ckpt = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
+        if ckpt.get("schema_version") not in (MODEL_SCHEMA_VERSION, None):
+            raise RuntimeError("checkpoint schema mismatch")
+        return ckpt
+
+    def _hydrate_family_from_checkpoint(self, family: PolicyFamily, ckpt: dict):
+        family.model.resize_embeddings(
+            max(len(ckpt.get("agent_slots", {})), 1),
+            max(len(ckpt.get("archetype_slots", {})), 1),
+        )
+        family.model.load_state_dict(ckpt["model_state"])
+        family.optimizer = optim.Adam(family.model.parameters(), lr=LEARNING_RATE)
+        optimizer_state = ckpt.get("optimizer_state")
+        if optimizer_state:
+            family.optimizer.load_state_dict(optimizer_state)
+        family.model_version = int(ckpt.get("model_version", 0))
+        family.train_steps = int(ckpt.get("train_steps", 0))
+        family.agent_slots = dict(ckpt.get("agent_slots", {}))
+        family.archetype_slots = dict(ckpt.get("archetype_slots", {}))
+        family.bound_agents = set(ckpt.get("bound_agents", [])) or set(family.agent_slots.keys())
+        family.last_eval_report = ckpt.get("last_eval_report")
+
     def _validate_runtime_contracts(self):
         if sys.version_info < (3, 12):
             raise RuntimeError(f"Python 3.12+ required, found {sys.version_info.major}.{sys.version_info.minor}")
@@ -889,9 +912,10 @@ class PPOTrainer:
                 family_model.eval()
                 self._save_family_checkpoint(request.family_id)
                 family_aliases["latest"] = request.model_version
-                family_aliases["candidate"] = request.model_version
-                if family_aliases.get("champion", 0) == 0 and request.model_version == 0:
-                    family_aliases["champion"] = 0
+                if family_aliases.get("candidate", 0) == 0:
+                    family_aliases["candidate"] = request.model_version
+                if family_aliases.get("champion", 0) == 0:
+                    family_aliases["champion"] = family_aliases.get("candidate", request.model_version)
                 self._write_family_aliases(request.family_id, family_aliases)
                 self._write_family_metadata(
                     request.family_id,
@@ -930,9 +954,10 @@ class PPOTrainer:
 
                     agent_aliases = self._read_agent_aliases(agent_id)
                     agent_aliases["latest"] = request.model_version
-                    agent_aliases["candidate"] = request.model_version
-                    if agent_aliases.get("champion", 0) == 0 and request.model_version == 0:
-                        agent_aliases["champion"] = 0
+                    if agent_aliases.get("candidate", 0) == 0:
+                        agent_aliases["candidate"] = request.model_version
+                    if agent_aliases.get("champion", 0) == 0:
+                        agent_aliases["champion"] = agent_aliases.get("candidate", request.model_version)
                     self._write_agent_aliases(agent_id, agent_aliases)
                     self.agents[agent_id].note_model_version(request.model_version, self.families[request.family_id].train_steps)
                     self._write_agent_metadata(agent_id, request.model_version)
@@ -971,23 +996,10 @@ class PPOTrainer:
                 print(f"[Trainer] Skipping family checkpoint {checkpoint}: {exc}")
 
     def _load_family_checkpoint(self, checkpoint_path: Path):
-        ckpt = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
-        if ckpt.get("schema_version") not in (MODEL_SCHEMA_VERSION, None):
-            raise RuntimeError("checkpoint schema mismatch")
+        ckpt = self._load_family_checkpoint_payload(checkpoint_path)
         family_id = ckpt["family_id"]
         family = PolicyFamily(family_id)
-        family.model.resize_embeddings(
-            max(len(ckpt.get("agent_slots", {})), 1),
-            max(len(ckpt.get("archetype_slots", {})), 1),
-        )
-        family.model.load_state_dict(ckpt["model_state"])
-        family.optimizer.load_state_dict(ckpt["optimizer_state"])
-        family.model_version = int(ckpt.get("model_version", 0))
-        family.train_steps = int(ckpt.get("train_steps", 0))
-        family.agent_slots = dict(ckpt.get("agent_slots", {}))
-        family.archetype_slots = dict(ckpt.get("archetype_slots", {}))
-        family.bound_agents = set(ckpt.get("bound_agents", [])) or set(family.agent_slots.keys())
-        family.last_eval_report = ckpt.get("last_eval_report")
+        self._hydrate_family_from_checkpoint(family, ckpt)
         self.families[family_id] = family
         self._write_family_metadata(family_id, family.model_version, {"aliases": self._read_family_aliases(family_id)})
         print(f"[Trainer] Loaded family {family_id} (v{family.model_version}, agents={len(family.bound_agents)})")
@@ -1191,6 +1203,76 @@ class PPOTrainer:
             self._write_agent_aliases(agent_id, agent_aliases)
         return {"ok": True, "family_id": family_id, "aliases": aliases}
 
+    def latest_passed_candidate_version(self, family_id: str) -> int:
+        for entry in reversed(self.get_evaluation_history(family_id, limit=250)):
+            version = int(entry.get("candidate_version", 0) or 0)
+            if entry.get("passed") and version > 0:
+                return version
+        return 0
+
+    def restore_family_version(
+        self,
+        family_id: str,
+        version: int,
+        note: str | None = None,
+        update_latest: bool = True,
+        update_candidate: bool = True,
+    ):
+        version = int(version or 0)
+        checkpoint_path = self._family_checkpoint_path(family_id, version)
+        if version <= 0 or not checkpoint_path.exists():
+            return {"ok": False, "error": f"checkpoint not found for {family_id} v{version}"}
+
+        with self.lock:
+            ckpt = self._load_family_checkpoint_payload(checkpoint_path)
+            family = self.families.get(family_id) or PolicyFamily(family_id)
+            self._hydrate_family_from_checkpoint(family, ckpt)
+            self.families[family_id] = family
+
+            aliases = self._read_family_aliases(family_id)
+            previous_latest = aliases.get("latest", 0)
+            previous_candidate = aliases.get("candidate", 0)
+            if update_latest:
+                aliases["latest"] = version
+            if update_candidate:
+                aliases["candidate"] = version
+            self._write_family_aliases(family_id, aliases)
+
+            for agent_id in sorted(family.bound_agents):
+                agent_aliases = self._read_agent_aliases(agent_id)
+                if update_latest:
+                    agent_aliases["latest"] = version
+                if update_candidate:
+                    agent_aliases["candidate"] = version
+                self._write_agent_aliases(agent_id, agent_aliases)
+                binding = self.ensure_binding(agent_id)
+                agent = self.get_or_create_agent(agent_id, binding)
+                agent.note_model_version(agent_aliases.get("latest", version), family.train_steps)
+
+            _append_jsonl(
+                PROMOTION_HISTORY,
+                {
+                    "action": "restore",
+                    "family_id": family_id,
+                    "version": version,
+                    "previous_latest": previous_latest,
+                    "previous_candidate": previous_candidate,
+                    "restored_at": time.time(),
+                    "note": note,
+                },
+            )
+
+        self._write_family_metadata(
+            family_id,
+            version,
+            {
+                "aliases": self._read_family_aliases(family_id),
+                "restore_note": note,
+            },
+        )
+        self.schedule_export(family_id, "restore", block=True)
+        return {"ok": True, "family_id": family_id, "version": version, "aliases": self._read_family_aliases(family_id)}
+
     def approve_champion(self, family_id: str, note: str | None = None):
         family = self.get_or_create_family(family_id)
         aliases = self._read_family_aliases(family_id)
@@ -1357,7 +1439,8 @@ class PPOTrainer:
             resolved = family.model_version
             aliases = self._read_agent_aliases(agent_id)
             aliases["latest"] = resolved
-            aliases["candidate"] = max(aliases.get("candidate", 0), resolved)
+            if aliases.get("candidate", 0) == 0:
+                aliases["candidate"] = resolved
             self._write_agent_aliases(agent_id, aliases)
         key = (binding["policy_family"], resolved)
         if self._agent_policy_path(agent_id, resolved).exists():
@@ -1532,6 +1615,23 @@ def create_app(trainer: PPOTrainer):
     def champion_reject(family_id):
         body = request.get_json(silent=True) or {}
         return jsonify(trainer.reject_champion(family_id, body.get("note")))
+
+    @app.route("/family/<family_id>/restore", methods=["POST"])
+    def restore_family(family_id):
+        body = request.get_json(silent=True) or {}
+        version = (
+            body.get("version")
+            or trainer.latest_passed_candidate_version(family_id)
+            or trainer.resolve_family_version(family_id, alias="champion")
+        )
+        result = trainer.restore_family_version(
+            family_id,
+            version,
+            note=body.get("note"),
+            update_latest=body.get("update_latest", True),
+            update_candidate=body.get("update_candidate", True),
+        )
+        return jsonify(result), (200 if result.get("ok") else 404)
 
     @app.route("/stats", methods=["GET"])
     def get_stats():

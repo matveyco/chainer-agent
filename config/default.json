@@ -51,7 +51,10 @@
     "port": 3101,
     "lockFile": "/tmp/chainer-agent.lock",
     "eventsLimit": 200,
-    "telemetryFlushMs": 1000
+    "telemetryFlushMs": 1000,
+    "combatRecoveryWindow": 4,
+    "combatRecoveryMinSignalRatio": 0.25,
+    "combatRecoveryCooldownMs": 300000
   },
   "persistence": {
     "savePopulationEvery": 10,

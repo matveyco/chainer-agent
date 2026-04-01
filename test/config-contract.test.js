@@ -44,6 +44,9 @@ test("config contract applies evaluation and family env overrides", () => {
     EVALUATION_SAMPLE_MATCHES: "7",
     EVALUATION_PROMOTION_MARGIN: "0.11",
     EVALUATION_MIN_WIN_RATE: "0.66",
+    COMBAT_RECOVERY_WINDOW: "6",
+    COMBAT_RECOVERY_MIN_SIGNAL_RATIO: "0.4",
+    COMBAT_RECOVERY_COOLDOWN_MS: "120000",
   });
 
   assert.equal(config.server.endpoint, "https://arena.override");
@@ -52,6 +55,9 @@ test("config contract applies evaluation and family env overrides", () => {
   assert.equal(config.evaluation.sampleMatches, 7);
   assert.equal(config.evaluation.promotionMargin, 0.11);
   assert.equal(config.evaluation.minWinRate, 0.66);
+  assert.equal(config.runtime.combatRecoveryWindow, 6);
+  assert.equal(config.runtime.combatRecoveryMinSignalRatio, 0.4);
+  assert.equal(config.runtime.combatRecoveryCooldownMs, 120000);
 });
 
 test("config contract validates production env completeness and TLS safety", () => {

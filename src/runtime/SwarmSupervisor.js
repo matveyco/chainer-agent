@@ -6,6 +6,11 @@ const { RoomCoordinator } = require("./RoomCoordinator");
 const { RuntimeState } = require("./RuntimeState");
 const { EvaluationManager } = require("./EvaluationManager");
 const { SingleInstanceLock } = require("./SingleInstanceLock");
+const {
+  computeCombatSignalRatio,
+  selectSafeRecoveryVersion,
+  shouldQueueAutomaticEvaluation,
+} = require("./Automation");
 const { loadRoster } = require("./Roster");
 const { StrategicBrain } = require("../bot/StrategicBrain");
 const logger = require("../utils/logger");
@@ -38,6 +43,9 @@ class SwarmSupervisor {
     this.totalMatches = 0;
     this.selectionInterval = config.training?.selectionInterval || 10;
     this.numCull = config.training?.numCull || 5;
+    this.lastAutoEvaluationMatchCount = 0;
+    this.lastRecoveredVersion = 0;
+    this.lastRecoveryAt = 0;
   }
 
   async run() {
@@ -87,6 +95,7 @@ class SwarmSupervisor {
         results = await this._runRoomBatch(this.roster, { mode: "training" });
       }
       this._refreshEvaluationSnapshot();
+      await this._maybeRecoverGameplayRegression();
 
       if (Array.isArray(results)) {
         for (const result of results) {
@@ -402,18 +411,73 @@ class SwarmSupervisor {
     return response.data;
   }
 
-  async _maybeQueueAutomaticEvaluation() {
-    if (this.totalMatches <= 0 || this.totalMatches % this.selectionInterval !== 0) {
-      return null;
+  async _promoteCandidate(familyId, version) {
+    const response = await fetchJSON(`${this.config.trainerUrl}/promotion/candidate/${familyId}`, {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    });
+    if (!response.ok) {
+      throw new Error(response.data?.error || `candidate promotion HTTP ${response.status}`);
     }
+    return response.data;
+  }
+
+  async _restoreFamilyVersion(familyId, version, reason) {
+    const response = await fetchJSON(`${this.config.trainerUrl}/family/${familyId}/restore`, {
+      method: "POST",
+      body: JSON.stringify({
+        version,
+        note: reason,
+        update_latest: true,
+        update_candidate: true,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(response.data?.error || `family restore HTTP ${response.status}`);
+    }
+    return response.data;
+  }
+
+  async _maybeQueueAutomaticEvaluation() {
     try {
-      const job = await this.evaluationManager.maybeQueueAutomatic((familyId) =>
-        this._fetchFamilyStatus(familyId)
-      );
+      if (this.evaluationManager.currentJob || this.evaluationManager.queue.length > 0) {
+        return null;
+      }
+      if (this.totalMatches <= 0 || this.totalMatches % this.selectionInterval !== 0) {
+        return null;
+      }
+
+      const familyId = this.config.training?.defaultPolicyFamily || "arena-main";
+      const familyStatus = await this._fetchFamilyStatus(familyId);
+      const latestVersion = Number(familyStatus?.aliases?.latest || 0);
+      const candidateVersion = Number(familyStatus?.aliases?.candidate || 0);
+
+      if (!shouldQueueAutomaticEvaluation({
+        totalMatches: this.totalMatches,
+        selectionInterval: this.selectionInterval,
+        lastQueuedMatchCount: this.lastAutoEvaluationMatchCount,
+        latestVersion,
+        candidateVersion,
+        hasCurrentJob: Boolean(this.evaluationManager.currentJob),
+        queuedJobs: this.evaluationManager.queue.length,
+      })) {
+        return null;
+      }
+
+      await this._promoteCandidate(familyId, latestVersion);
+      const job = this.evaluationManager.queueRun({
+        familyId,
+        requestedBy: "auto",
+        reason: "interval",
+        candidateVersion: latestVersion,
+        championVersion: familyStatus.aliases?.champion || 0,
+      });
+      this.lastAutoEvaluationMatchCount = this.totalMatches;
       if (job) {
         this.runtimeState.recordEvent("info", "automatic evaluation queued", {
           familyId: job.familyId,
-          candidateVersion: job.candidateVersion,
+          candidateVersion: latestVersion,
+          totalMatches: this.totalMatches,
         });
       }
       return job;
@@ -423,6 +487,46 @@ class SwarmSupervisor {
       });
       return null;
     }
+  }
+
+  async _maybeRecoverGameplayRegression() {
+    if (this.evaluationManager.currentJob) return null;
+
+    const windowSize = this.config.runtime?.combatRecoveryWindow || 4;
+    const minSignalRatio = this.config.runtime?.combatRecoveryMinSignalRatio || 0.25;
+    const cooldownMs = this.config.runtime?.combatRecoveryCooldownMs || 300000;
+    const recentTrainingMatches = this.runtimeState
+      .getMatchSummariesSnapshot(windowSize * 4)
+      .filter((match) => match.mode === "training")
+      .slice(0, windowSize);
+
+    if (recentTrainingMatches.length < windowSize) return null;
+
+    const combatSignalRatio = computeCombatSignalRatio(recentTrainingMatches);
+    if (combatSignalRatio >= minSignalRatio) return null;
+    if (Date.now() - this.lastRecoveryAt < cooldownMs) return null;
+
+    const familyId = this.config.training?.defaultPolicyFamily || "arena-main";
+    const familyStatus = await this._fetchFamilyStatus(familyId);
+    const liveVersion = Number(familyStatus?.aliases?.latest || 0);
+    const safeVersion = selectSafeRecoveryVersion(familyStatus);
+
+    if (!safeVersion || safeVersion === liveVersion || safeVersion === this.lastRecoveredVersion) {
+      return null;
+    }
+
+    const reason = `recent training matches lost combat signal (${combatSignalRatio.toFixed(2)} over ${recentTrainingMatches.length} rooms)`;
+    const restore = await this._restoreFamilyVersion(familyId, safeVersion, reason);
+    this.lastRecoveredVersion = safeVersion;
+    this.lastRecoveryAt = Date.now();
+    this.runtimeState.recordEvent("warn", "automatic gameplay recovery applied", {
+      familyId,
+      restoredVersion: safeVersion,
+      previousLatest: liveVersion,
+      combatSignalRatio: +combatSignalRatio.toFixed(3),
+      restore,
+    });
+    return restore;
   }
 
   _refreshEvaluationSnapshot() {
