@@ -989,7 +989,22 @@ class PPOTrainer:
             self.schedule_export(family_id, "startup", block=False)
 
     def _load_families(self):
-        for checkpoint in sorted(POLICIES_DIR.glob("*/versions/v*/checkpoint.pt")):
+        for family_dir in sorted(POLICIES_DIR.glob("*")):
+            versions_dir = family_dir / "versions"
+            if not family_dir.is_dir() or not versions_dir.exists():
+                continue
+
+            aliases = _read_json(self._family_aliases_path(family_dir.name), self.alias_defaults)
+            preferred = int(aliases.get("latest", 0) or 0)
+            checkpoint = self._family_checkpoint_path(family_dir.name, preferred) if preferred > 0 else None
+
+            if not checkpoint or not checkpoint.exists():
+                checkpoints = sorted(versions_dir.glob("v*/checkpoint.pt"))
+                checkpoint = checkpoints[-1] if checkpoints else None
+
+            if not checkpoint or not checkpoint.exists():
+                continue
+
             try:
                 self._load_family_checkpoint(checkpoint)
             except Exception as exc:
