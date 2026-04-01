@@ -125,3 +125,32 @@ test("evaluation manager fails closed on partial or duplicate evaluation rooms",
   assert.match(completed.error, /incomplete|duplicate room id|no combat or score signal/);
   assert.equal(manager.getHistory(1)[0].status, "failed");
 });
+
+test("evaluation manager fails stale in-flight jobs on restart", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "chainer-eval-"));
+  const stateFile = path.join(tempDir, "evaluation_state.json");
+  fs.writeFileSync(stateFile, JSON.stringify({
+    current: {
+      id: "stale-job",
+      familyId: "arena-main",
+      status: "running",
+      requestedAt: new Date().toISOString(),
+    },
+    queue: [],
+  }));
+
+  const manager = new EvaluationManager({
+    config: makeConfig(tempDir),
+    runtimeState: makeRuntimeState(),
+    roster: [[
+      { agentId: "agent_0", modelAlias: "candidate", policyFamily: "arena-main", archetypeId: "tactician" },
+      { agentId: "agent_1", modelAlias: "champion", policyFamily: "arena-main", archetypeId: "collector" },
+    ]],
+    trainerUrl: "http://localhost:5555",
+  });
+
+  assert.equal(manager.getStatus().current, null);
+  assert.equal(manager.getHistory(1)[0].id, "stale-job");
+  assert.equal(manager.getHistory(1)[0].status, "failed");
+  assert.match(manager.getHistory(1)[0].error, /restart/);
+});

@@ -331,14 +331,27 @@ class EvaluationManager {
 
   _load() {
     try {
+      let staleCurrent = null;
       if (fs.existsSync(this.stateFile)) {
         const state = JSON.parse(fs.readFileSync(this.stateFile, "utf-8"));
         this.queue = state.queue || [];
-        this.currentJob = state.current || null;
+        staleCurrent = state.current || null;
+        this.currentJob = null;
       }
       if (fs.existsSync(this.historyFile)) {
         const lines = fs.readFileSync(this.historyFile, "utf-8").split("\n").filter(Boolean);
         this.history = lines.map((line) => JSON.parse(line)).slice(-this.historyLimit).reverse();
+      }
+      if (staleCurrent) {
+        staleCurrent = {
+          ...staleCurrent,
+          status: "failed",
+          finishedAt: new Date().toISOString(),
+          error: staleCurrent.error || "interrupted by process restart",
+        };
+        this.history.unshift(clone(staleCurrent));
+        if (this.history.length > this.historyLimit) this.history.length = this.historyLimit;
+        this._persist();
       }
     } catch {}
   }
