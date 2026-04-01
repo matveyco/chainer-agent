@@ -46,3 +46,32 @@ test("agent brain resetMatch clears episode reward totals", () => {
   brain.resetMatch();
   assert.deepEqual(brain.episodeRewardTotals, {});
 });
+
+test("agent brain reloads when trainer reports a different model version", async (t) => {
+  const brain = new AgentBrain("agent_test", "http://localhost:5555");
+  brain.modelVersion = 100;
+  brain.experienceBuffer = [{
+    state: Array.from({ length: STATE_DIM }, () => 0),
+    action: Array.from({ length: ACTION_DIM }, () => 0),
+    reward: 0,
+    reward_components: {},
+    done: false,
+  }];
+
+  let reloads = 0;
+  brain._loadModel = async () => { // eslint-disable-line no-underscore-dangle
+    reloads += 1;
+  };
+
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ ok: true, accepted: 1, model_version: 42 }),
+  });
+  t.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  await brain.flush();
+  assert.equal(reloads, 1);
+});

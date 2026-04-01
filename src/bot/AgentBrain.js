@@ -162,7 +162,7 @@ class AgentBrain {
         const data = await res.json();
         this.reporter?.incrementCounter("experienceFlushes");
         this.reporter?.observe("experienceFlushSizeAvg", this.experienceBuffer.length);
-        if (data.model_version > this.modelVersion) {
+        if (data.model_version && data.model_version !== this.modelVersion) {
           await this._loadModel(true);
         }
       }

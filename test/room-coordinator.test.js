@@ -71,8 +71,8 @@ test("room coordinator summary includes activity validity signals", () => {
   };
   const connectedSessions = [{ userID: "u0" }, { userID: "u1" }];
   const agentResults = [
-    { score: 250, kills: 2, deaths: 1, damageDealt: 300, inputsSent: 120, stateUpdates: 40 },
-    { score: 100, kills: 1, deaths: 2, damageDealt: 150, inputsSent: 118, stateUpdates: 0 },
+    { score: 250, kills: 2, deaths: 1, damageDealt: 300, inputsSent: 120, stateUpdates: 40, decisionsMade: 60, shotsFired: 9, tacticalOverrides: 12 },
+    { score: 100, kills: 1, deaths: 2, damageDealt: 150, inputsSent: 118, stateUpdates: 0, decisionsMade: 58, shotsFired: 7, tacticalOverrides: 10 },
   ];
 
   const summary = coordinator._buildMatchSummary(selection, connectedSessions, agentResults);
@@ -85,5 +85,8 @@ test("room coordinator summary includes activity validity signals", () => {
   assert.equal(summary.totalDeaths, 3);
   assert.equal(summary.totalInputsSent, 238);
   assert.equal(summary.totalStateUpdates, 40);
+  assert.equal(summary.totalDecisionsMade, 118);
+  assert.equal(summary.totalShotsFired, 16);
+  assert.equal(summary.totalTacticalOverrides, 22);
   assert.equal(summary.hasCombatSignal, true);
 });

@@ -153,6 +153,7 @@ class RoomCoordinator {
         modelVersion: agent.modelVersion,
         policyFamily: agent.policyFamily,
         archetypeId: agent.archetypeId,
+        mode: this.mode,
         reporter: this.runtimeState,
       });
 
@@ -671,6 +672,9 @@ class RoomCoordinator {
       damageTaken: summary.damageTaken,
       survivalTime: summary.survivalTime,
       abilitiesUsed: summary.abilitiesUsed,
+      decisionsMade: runtime.decisionsMade || 0,
+      shotsFired: runtime.shotsFired || 0,
+      tacticalOverrides: runtime.tacticalOverrides || 0,
       inputsSent: runtime.inputsSent,
       stateUpdates: runtime.stateUpdates,
     };
@@ -685,6 +689,9 @@ class RoomCoordinator {
     const totalDeaths = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.deaths), 0);
     const totalInputsSent = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.inputsSent), 0);
     const totalStateUpdates = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.stateUpdates), 0);
+    const totalDecisionsMade = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.decisionsMade), 0);
+    const totalShotsFired = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.shotsFired), 0);
+    const totalTacticalOverrides = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.tacticalOverrides), 0);
     const hasCombatSignal = totalScore > 0 || totalDamageDealt > 0 || totalKills > 0 || totalDeaths > 0;
 
     return {
@@ -707,6 +714,9 @@ class RoomCoordinator {
       totalDeaths,
       totalInputsSent,
       totalStateUpdates,
+      totalDecisionsMade,
+      totalShotsFired,
+      totalTacticalOverrides,
       hasCombatSignal,
       winner: agentResults[0] || null,
       agentResults,

@@ -5,6 +5,7 @@
 const { AgentBrain } = require("./AgentBrain");
 const { StrategicBrain } = require("./StrategicBrain");
 const { StateExtractor } = require("./StateExtractor");
+const { TacticalController } = require("./TacticalController");
 const { FitnessTracker } = require("../metrics/FitnessTracker");
 const { encodeInput, encodeShoot } = require("../network/Protocol");
 const { rand, getArrayLength, getDirectionArray } = require("../utils/math");
@@ -21,10 +22,12 @@ class SmartBot {
     this.modelVersion = options.modelVersion ?? null;
     this.policyFamily = options.policyFamily || "arena-main";
     this.archetypeId = options.archetypeId || "tactician";
+    this.mode = options.mode || "training";
     this.reporter = options.reporter || null;
     this.config = config;
     this.mapName = config.server.mapName;
     this.weaponType = config.server.weaponType;
+    this.agentSeed = parseInt(String(this.agentId).replace(/\D/g, ""), 10) || 0;
 
     this.brain = null;
     this.strategicBrain = null;
@@ -42,6 +45,11 @@ class SmartBot {
     }
 
     this.stateExtractor = new StateExtractor();
+    this.tacticalController = new TacticalController({
+      archetypeId: this.archetypeId,
+      seed: this.agentSeed,
+      safeSize: config.bot?.arenaSafeSize,
+    });
     this.fitness = new FitnessTracker();
 
     this.room = null;
@@ -76,6 +84,13 @@ class SmartBot {
     this.positionVector = { x: 0, y: 0, z: 0 };
     this.decisionInFlight = false;
     this.lastAbilityUsed = false;
+    this.lastTargetPoint = { x: 0, y: 0, z: 0 };
+    this.lastCombatAt = Date.now();
+    this.lastShotAt = 0;
+    this.decisionsMade = 0;
+    this.shotsFired = 0;
+    this.tacticalOverrides = 0;
+    this.tacticalReasons = [];
 
     this._lastGotKill = false;
     this._lastDied = false;
@@ -174,6 +189,10 @@ class SmartBot {
         done: false,
       });
 
+      if (this._lastDamageDealt > 0 || this._lastDamageTaken > 0 || this._lastGotKill || this._lastDied) {
+        this.lastCombatAt = Date.now();
+      }
+
       this._lastGotKill = false;
       this._lastDied = false;
       this._lastDamageDealt = 0;
@@ -199,6 +218,7 @@ class SmartBot {
 
   _applyDecision(decision) {
     if (!decision || this.matchEnded) return;
+    this.decisionsMade += 1;
 
     if (this.strategicBrain) {
       const crystalCtx = this.closestCrystal
@@ -221,6 +241,25 @@ class SmartBot {
         posZ: this.positionArray[2] / 60,
         closestCrystal: crystalCtx,
       });
+    }
+
+    const tactical = this.tacticalController.stabilize(decision, {
+      enemy: this.closestEnemy ? this._getEnemyContext() : null,
+      crystal: this.closestCrystal ? this._getCrystalContext() : null,
+      strategy: this.strategicBrain?.getStrategyVector?.() || null,
+      healthPercent: (this.data?.health || 100) / 100,
+      weaponRange: this.data?.weaponTargetDistance || 20,
+      cooldownReady: this.coolDownTimer <= 0,
+      abilityReady: this._hasReadyAbility(),
+      passiveMs: Date.now() - Math.max(this.lastCombatAt || 0, this.lastShotAt || 0),
+      position: this.positionVector,
+      distanceFromCenter: getArrayLength(this.positionArray),
+    });
+    decision = tactical.action;
+    if (tactical.overridden) {
+      this.tacticalOverrides += 1;
+      this.tacticalReasons = tactical.reasons;
+      this.reporter?.incrementCounter("tacticalOverrides");
     }
 
     const input = this.inputBuffer[this.inputIndex];
@@ -257,8 +296,14 @@ class SmartBot {
       input.target[2] = this.positionArray[2] + moveZ * 10;
     }
 
+    this.lastTargetPoint = {
+      x: input.target[0],
+      y: input.target[1],
+      z: input.target[2],
+    };
+
     if (decision.shouldShoot && this.closestEnemy && this.coolDownTimer <= 0 && this.data?.health > 0) {
-      this._shoot();
+      this._shoot(this.lastTargetPoint);
     }
 
     if (decision.shouldUseAbility && this.abilityTimer <= 0) {
@@ -267,17 +312,16 @@ class SmartBot {
     }
   }
 
-  _shoot() {
+  _shoot(targetPoint = null) {
     if (!this.closestEnemy || !this.data) return;
-    const target = [
-      this.closestEnemy.position.x + rand(-1, 1),
-      this.closestEnemy.position.y || 0,
-      this.closestEnemy.position.z + rand(-1, 1),
-    ];
+    const target = this._buildShootTarget(targetPoint);
     const buffer = encodeShoot(this.positionArray, target, this.data.weaponType || this.weaponType);
     this.room.send("room:player:shoot", buffer);
     this.fitness.recordShot();
-    this.coolDownTimer = (this.data.weaponCoolDown || 1) + rand(0.3, 1.5);
+    this.shotsFired += 1;
+    this.lastShotAt = Date.now();
+    this.reporter?.incrementCounter("shotsFired");
+    this.coolDownTimer = this._getWeaponCooldownSeconds() + rand(0.05, 0.25);
   }
 
   _useAbility() {
@@ -319,6 +363,9 @@ class SmartBot {
     return {
       inputsSent: this._inputsSent,
       stateUpdates: this._stateUpdatesSeen,
+      decisionsMade: this.decisionsMade,
+      shotsFired: this.shotsFired,
+      tacticalOverrides: this.tacticalOverrides,
       modelAlias: this.modelAlias,
       modelVersion: this.brain?.modelVersion || 0,
       policyFamily: this.policyFamily,
@@ -338,6 +385,57 @@ class SmartBot {
     this.gameState = null;
     this.closestEnemy = null;
     this.closestCrystal = null;
+  }
+
+  _getEnemyContext() {
+    if (!this.closestEnemy) return null;
+    const dx = this.closestEnemy.position.x - this.positionArray[0];
+    const dz = this.closestEnemy.position.z - this.positionArray[2];
+    const length = Math.hypot(dx, dz) || 1;
+    return {
+      distance: this.closestEnemy.distance || length,
+      dirX: dx / length,
+      dirZ: dz / length,
+    };
+  }
+
+  _getCrystalContext() {
+    if (!this.closestCrystal) return null;
+    const dx = this.closestCrystal.x - this.positionArray[0];
+    const dz = this.closestCrystal.z - this.positionArray[2];
+    const length = Math.hypot(dx, dz) || 1;
+    return {
+      dirX: dx / length,
+      dirZ: dz / length,
+      distance: this.closestCrystal.distance || length,
+    };
+  }
+
+  _hasReadyAbility() {
+    if (!this.data?.abilities?.values) return false;
+    for (const ability of this.data.abilities.values()) {
+      if (ability?.ready) return true;
+    }
+    return false;
+  }
+
+  _getWeaponCooldownSeconds() {
+    const raw = Number(this.data?.weaponCoolDown);
+    if (!Number.isFinite(raw) || raw <= 0) return 1;
+    return raw > 10 ? raw / 1000 : raw;
+  }
+
+  _buildShootTarget(targetPoint = null) {
+    const strategy = this.strategicBrain?.getStrategyVector?.() || {};
+    const accuracy = Math.max(0, Math.min(1, Number(strategy.accuracy_focus ?? 0.5) || 0.5));
+    const jitter = 0.1 + (1 - accuracy) * 0.6;
+    const fallback = this.closestEnemy?.position || { x: 0, y: 0, z: 0 };
+    const base = targetPoint || this.lastTargetPoint || fallback;
+    return [
+      Number(base.x ?? fallback.x) + rand(-jitter, jitter),
+      Number(base.y ?? fallback.y) || 0,
+      Number(base.z ?? fallback.z) + rand(-jitter, jitter),
+    ];
   }
 }
 
