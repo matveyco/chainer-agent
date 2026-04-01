@@ -134,6 +134,33 @@ def _append_jsonl(path: Path, payload: dict):
         handle.write(json.dumps(payload) + "\n")
 
 
+def _read_last_jsonl_entry(path: Path):
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            if position <= 0:
+                return None
+
+            buffer = bytearray()
+            while position > 0:
+                position -= 1
+                handle.seek(position)
+                byte = handle.read(1)
+                if byte == b"\n" and buffer:
+                    break
+                if byte != b"\n":
+                    buffer.extend(byte)
+
+            if not buffer:
+                return None
+            return json.loads(bytes(reversed(buffer)).decode("utf-8"))
+    except Exception:
+        return None
+
+
 def _is_valid_float_list(lst, expected_len):
     if not isinstance(lst, list) or len(lst) != expected_len:
         return False
@@ -1033,18 +1060,10 @@ class PPOTrainer:
             self._restore_agent_history(agent_id, agent)
 
     def _restore_agent_history(self, agent_id: str, agent: AgentRecord):
-        entries = []
         path = self._history_path(agent_id)
-        if path.exists():
-            for line in path.read_text().splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    entries.append(json.loads(line))
-                except Exception:
-                    continue
-        if entries:
-            agent.restore(entries[-1])
+        latest_entry = _read_last_jsonl_entry(path)
+        if latest_entry:
+            agent.restore(latest_entry)
             return
 
         aliases = self._read_agent_aliases(agent_id)
