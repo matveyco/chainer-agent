@@ -37,6 +37,27 @@ test("room coordinator chooses the room with the strongest assignment group", ()
   assert.equal(selection.sessionIds.has("u3"), true);
 });
 
+test("room coordinator skips backend rooms already claimed by another track", () => {
+  const runtimeState = makeRuntimeState();
+  const coordinator = new RoomCoordinator({
+    roomIndex: 1,
+    roster: [{ agentId: "agent_0" }, { agentId: "agent_1" }, { agentId: "agent_2" }, { agentId: "agent_3" }],
+    config: { rooms: { minReadyRatio: 0.5 }, bot: {}, server: {} },
+    runtimeState,
+    strategicBrains: new Map(),
+  });
+
+  const selection = coordinator._selectBestAssignmentGroup([
+    { userID: "u0", assignment: { room: { roomId: "room-a", publicAddress: "a" } } },
+    { userID: "u1", assignment: { room: { roomId: "room-a", publicAddress: "a" } } },
+    { userID: "u2", assignment: { room: { roomId: "room-b", publicAddress: "b" } } },
+    { userID: "u3", assignment: { room: { roomId: "room-b", publicAddress: "b" } } },
+  ], new Set(["room-a"]));
+
+  assert.equal(selection.roomId, "room-b");
+  assert.equal(selection.sessions.length, 2);
+});
+
 test("room coordinator classifies seat expiry and room lock join failures", () => {
   const runtimeState = makeRuntimeState();
   const coordinator = new RoomCoordinator({

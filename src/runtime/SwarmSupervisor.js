@@ -52,6 +52,7 @@ class SwarmSupervisor {
     this.lastAutoEvaluationMatchCount = 0;
     this.lastRecoveredVersion = 0;
     this.lastRecoveryAt = 0;
+    this.claimedBackendRooms = new Map();
     const existingSchedule = this.evaluationManager.getStatus().schedule || {};
     if (!existingSchedule.nextWindowAt) {
       this.evaluationManager.setScheduleState({
@@ -374,6 +375,38 @@ class SwarmSupervisor {
     });
   }
 
+  _tryClaimBackendRoom(roomId, owner = {}) {
+    if (!roomId) return false;
+    const existing = this.claimedBackendRooms.get(roomId);
+    if (existing && existing.roomIndex !== owner.roomIndex) {
+      return false;
+    }
+    this.claimedBackendRooms.set(roomId, {
+      roomIndex: owner.roomIndex,
+      track: owner.track || null,
+      mode: owner.mode || null,
+      claimedAt: new Date().toISOString(),
+    });
+    return true;
+  }
+
+  _releaseBackendRoom(roomId, owner = {}) {
+    if (!roomId) return;
+    const existing = this.claimedBackendRooms.get(roomId);
+    if (!existing || existing.roomIndex === owner.roomIndex) {
+      this.claimedBackendRooms.delete(roomId);
+    }
+  }
+
+  _getClaimedBackendRoomIds(excludeRoomIndex = null) {
+    const claimed = new Set();
+    for (const [roomId, owner] of this.claimedBackendRooms.entries()) {
+      if (excludeRoomIndex !== null && owner.roomIndex === excludeRoomIndex) continue;
+      claimed.add(roomId);
+    }
+    return claimed;
+  }
+
   async _runRoomBatch(roomRosters, options = {}) {
     const mode = options.mode || "training";
     const runSerially = mode === "evaluation" || this.config.rooms?.parallelTrainingBatches === false;
@@ -394,6 +427,9 @@ class SwarmSupervisor {
           track: roomPlan.track || (mode === "evaluation" ? "evaluation" : "training"),
           resolvedAlias: roomPlan.resolvedAlias || null,
           resolvedVersion: roomPlan.resolvedVersion || 0,
+          claimBackendRoom: (roomId, owner) => this._tryClaimBackendRoom(roomId, owner),
+          releaseBackendRoom: (roomId, owner) => this._releaseBackendRoom(roomId, owner),
+          getClaimedBackendRoomIds: (excludeRoomIndex) => this._getClaimedBackendRoomIds(excludeRoomIndex),
         });
 
         results.push(
@@ -427,6 +463,9 @@ class SwarmSupervisor {
         track: roomPlan.track || (mode === "evaluation" ? "evaluation" : "training"),
         resolvedAlias: roomPlan.resolvedAlias || null,
         resolvedVersion: roomPlan.resolvedVersion || 0,
+        claimBackendRoom: (roomId, owner) => this._tryClaimBackendRoom(roomId, owner),
+        releaseBackendRoom: (roomId, owner) => this._releaseBackendRoom(roomId, owner),
+        getClaimedBackendRoomIds: (excludeRoomIndex) => this._getClaimedBackendRoomIds(excludeRoomIndex),
       });
 
       roomPromises.push(

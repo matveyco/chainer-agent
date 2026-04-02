@@ -43,6 +43,9 @@ class RoomCoordinator {
     track = "training",
     resolvedAlias = null,
     resolvedVersion = null,
+    claimBackendRoom = null,
+    releaseBackendRoom = null,
+    getClaimedBackendRoomIds = null,
   }) {
     this.roomIndex = roomIndex;
     this.roster = roster;
@@ -55,6 +58,10 @@ class RoomCoordinator {
     this.track = track;
     this.resolvedAlias = resolvedAlias;
     this.resolvedVersion = Number(resolvedVersion || 0);
+    this.claimBackendRoom = claimBackendRoom;
+    this.releaseBackendRoom = releaseBackendRoom;
+    this.getClaimedBackendRoomIds = getClaimedBackendRoomIds;
+    this.claimedRoomId = null;
     this.roomState = this.runtimeState.ensureRoom(roomIndex);
     this.requiredAgents = Math.max(
       1,
@@ -167,6 +174,7 @@ class RoomCoordinator {
       };
     } finally {
       await this._cleanupSessions(sessions);
+      this._releaseClaimedBackendRoom();
       gameState.clear();
     }
   }
@@ -233,65 +241,71 @@ class RoomCoordinator {
     const pollMs = this.config.rooms?.assignmentPollMs || 1500;
     let firstAssignmentAt = null;
     let bestSelection = null;
+    let selected = null;
 
     while (Date.now() < deadline) {
       const unsettled = sessions.filter((session) => !session.assignment);
-      if (unsettled.length === 0) break;
+      if (unsettled.length > 0) {
+        const responses = await Promise.all(unsettled.map(async (session) => {
+          try {
+            const data = await fetchJSON(
+              `${endpoint}/matchmaker/user-queue-position/${session.userID}`
+            );
+            return { session, data };
+          } catch (err) {
+            return { session, error: err };
+          }
+        }));
 
-      const responses = await Promise.all(unsettled.map(async (session) => {
-        try {
-          const data = await fetchJSON(
-            `${endpoint}/matchmaker/user-queue-position/${session.userID}`
-          );
-          return { session, data };
-        } catch (err) {
-          return { session, error: err };
-        }
-      }));
-
-      for (const response of responses) {
-        if (response.data?.data?.room) {
-          response.session.assignment = {
-            room: response.data.data.room,
-            assignedAt: Date.now(),
-          };
-          this.runtimeState.incrementCounter("queueAssignments");
-          if (!firstAssignmentAt) firstAssignmentAt = response.session.assignment.assignedAt;
+        for (const response of responses) {
+          if (response.data?.data?.room) {
+            response.session.assignment = {
+              room: response.data.data.room,
+              assignedAt: Date.now(),
+            };
+            this.runtimeState.incrementCounter("queueAssignments");
+            if (!firstAssignmentAt) firstAssignmentAt = response.session.assignment.assignedAt;
+          }
         }
       }
 
-      bestSelection = this._selectBestAssignmentGroup(sessions);
+      const claimedRoomIds = this.getClaimedBackendRoomIds?.(this.roomIndex) || new Set();
+      await this._requeueClaimedAssignments(sessions, claimedRoomIds);
+
+      bestSelection = this._selectBestAssignmentGroup(sessions, claimedRoomIds);
       if (
         bestSelection &&
         bestSelection.sessions.length >= this.requiredAgents &&
         firstAssignmentAt &&
-        Date.now() - firstAssignmentAt >= pollMs
+        Date.now() - firstAssignmentAt >= pollMs &&
+        this._claimSelection(bestSelection)
       ) {
+        selected = bestSelection;
         break;
       }
 
       await this._sleep(pollMs);
     }
 
-    if (!bestSelection) {
+    if (!selected) {
       this.runtimeState.incrementCounter("queueTimeouts");
       await this._leaveQueue(sessions);
       return null;
     }
 
-    const queueWaitMs = bestSelection.sessions.reduce(
+    const queueWaitMs = selected.sessions.reduce(
       (sum, session) => sum + ((session.assignment?.assignedAt || Date.now()) - session.queuedAt),
       0
-    ) / Math.max(bestSelection.sessions.length, 1);
+    ) / Math.max(selected.sessions.length, 1);
 
     this.runtimeState.observe("queueWaitMsAvg", queueWaitMs);
     this.runtimeState.updateRoom(this.roomIndex, {
       phase: "assigned",
       status: "assigned",
-      assignedAgents: bestSelection.sessions.length,
+      assignedAgents: selected.sessions.length,
       queueWaitMs: Math.round(queueWaitMs),
-      roomId: bestSelection.roomId,
-      publicAddress: bestSelection.publicAddress,
+      roomId: selected.roomId,
+      publicAddress: selected.publicAddress,
       mode: this.mode,
       jobId: this.jobId,
       templateId: this.templateId,
@@ -300,14 +314,14 @@ class RoomCoordinator {
       resolvedVersion: this.resolvedVersion,
     });
 
-    return bestSelection;
+    return selected;
   }
 
-  _selectBestAssignmentGroup(sessions) {
+  _selectBestAssignmentGroup(sessions, excludedRoomIds = new Set()) {
     const grouped = new Map();
     for (const session of sessions) {
       const roomId = session.assignment?.room?.roomId;
-      if (!roomId) continue;
+      if (!roomId || excludedRoomIds.has(roomId)) continue;
       if (!grouped.has(roomId)) {
         grouped.set(roomId, {
           roomId,
@@ -322,6 +336,59 @@ class RoomCoordinator {
     }
 
     return [...grouped.values()].sort((a, b) => b.sessions.length - a.sessions.length)[0] || null;
+  }
+
+  _claimSelection(selection) {
+    if (!selection?.roomId || !this.claimBackendRoom) {
+      this.claimedRoomId = selection?.roomId || null;
+      return true;
+    }
+    const claimed = this.claimBackendRoom(selection.roomId, {
+      roomIndex: this.roomIndex,
+      track: this.track,
+      mode: this.mode,
+    });
+    if (claimed) {
+      this.claimedRoomId = selection.roomId;
+    }
+    return claimed;
+  }
+
+  _releaseClaimedBackendRoom() {
+    if (!this.claimedRoomId || !this.releaseBackendRoom) return;
+    this.releaseBackendRoom(this.claimedRoomId, { roomIndex: this.roomIndex });
+    this.claimedRoomId = null;
+  }
+
+  async _requeueClaimedAssignments(sessions, claimedRoomIds) {
+    if (!claimedRoomIds?.size) return;
+    const conflicted = sessions.filter((session) => {
+      const roomId = session.assignment?.room?.roomId;
+      if (!roomId || !claimedRoomIds.has(roomId)) return false;
+      const now = Date.now();
+      if (session.lastConflictRequeueAt && now - session.lastConflictRequeueAt < (this.config.rooms?.requeueBackoffMs || 3000)) {
+        return false;
+      }
+      session.lastConflictRequeueAt = now;
+      return true;
+    });
+
+    if (!conflicted.length) return;
+
+    this.runtimeState.recordEvent?.("warn", "requeueing conflicted room assignments", {
+      roomIndex: this.roomIndex,
+      conflictedCount: conflicted.length,
+      track: this.track,
+    });
+    await this._leaveQueue(conflicted);
+    for (const session of conflicted) {
+      session.assignment = null;
+      session.queued = false;
+      session.queueLeft = false;
+      session.queuedAt = null;
+    }
+    await this._sleep(250 + Math.floor(Math.random() * 500));
+    await this._queueBots(conflicted);
   }
 
   async _connectAssignedSessions(selection) {
