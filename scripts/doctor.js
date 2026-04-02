@@ -13,7 +13,7 @@ const {
   validateEnvContract,
   validateRuntimeVersions,
 } = require("../src/runtime/ConfigContract");
-const { normalizeRosterDocument } = require("../src/runtime/Roster");
+const { countRosterAgents, normalizeRosterDocument } = require("../src/runtime/Roster");
 
 async function checkUrl(url) {
   const res = await fetch(url);
@@ -80,7 +80,7 @@ function inspectPythonEnvironment() {
     report.roster = {
       ok: true,
       rooms: roster.length,
-      agents: roster.flat().length,
+      agents: countRosterAgents(roster),
     };
   } catch (err) {
     report.errors.push(`Invalid roster: ${err.message}`);

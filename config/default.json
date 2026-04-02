@@ -9,7 +9,7 @@
     "count": 2,
     "tracks": ["stable", "training"],
     "agentsPerRoom": 12,
-    "parallelTrainingBatches": false,
+    "parallelTrainingBatches": true,
     "staggerMs": 5000,
     "assignmentPollMs": 1500,
     "assignmentTimeoutMs": 90000,
