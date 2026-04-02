@@ -18,6 +18,7 @@ class StrategicBrain {
     this.model = model;
     this.trainerUrl = options.trainerUrl || null;
     this.reporter = options.reporter || null;
+    this.timeoutMs = Math.max(500, Number(options.timeoutMs || 3000));
 
     const idx = parseInt(agentId.replace(/\D/g, ""), 10) || 0;
     const archetype = getDefaultArchetype(options.archetypeId, idx);
@@ -29,7 +30,7 @@ class StrategicBrain {
       seed: idx,
     };
 
-    this.strategy = { ...archetype.defaults };
+    this.strategy = { ...archetype.defaults, ...(options.initialStrategy || {}) };
     this.matchHistory = [];
     this.currentPlan = `Playing as ${archetype.name}: ${archetype.traits}`;
     this.lastAnalysis = "";
@@ -261,21 +262,33 @@ ${JSON.stringify(lastMatch)}`;
   }
 
   async _callLLM(prompt) {
-    const res = await fetch(OLLAMA_API, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.model,
-        messages: [{ role: "user", content: prompt }],
-        stream: false,
-      }),
-    });
-    if (!res.ok) throw new Error(`LLM API ${res.status}`);
-    const data = await res.json();
-    return data.message?.content || "";
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(OLLAMA_API, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: this.model,
+          messages: [{ role: "user", content: prompt }],
+          stream: false,
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`LLM API ${res.status}`);
+      const data = await res.json();
+      return data.message?.content || "";
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw new Error(`LLM timeout after ${this.timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }
 

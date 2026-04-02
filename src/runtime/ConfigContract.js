@@ -30,10 +30,20 @@ function applyEnvOverrides(config, env = process.env) {
   if (env.EVALUATION_SAMPLE_MATCHES) next.evaluation.sampleMatches = parseInt(env.EVALUATION_SAMPLE_MATCHES, 10);
   if (env.EVALUATION_PROMOTION_MARGIN) next.evaluation.promotionMargin = parseFloat(env.EVALUATION_PROMOTION_MARGIN);
   if (env.EVALUATION_MIN_WIN_RATE) next.evaluation.minWinRate = parseFloat(env.EVALUATION_MIN_WIN_RATE);
+  if (env.EVALUATION_WINDOW_MINUTES) next.evaluation.windowIntervalMinutes = parseInt(env.EVALUATION_WINDOW_MINUTES, 10);
+  if (env.EVALUATION_AUTO_STAGE_MIN_VERSION_DELTA) next.evaluation.autoStageMinVersionDelta = parseInt(env.EVALUATION_AUTO_STAGE_MIN_VERSION_DELTA, 10);
+  if (env.EVALUATION_STAGING_RECENT_MATCHES) next.evaluation.stagingRecentMatches = parseInt(env.EVALUATION_STAGING_RECENT_MATCHES, 10);
+  if (env.EVALUATION_STAGING_MIN_COMBAT_SIGNAL_RATIO) next.evaluation.stagingMinCombatSignalRatio = parseFloat(env.EVALUATION_STAGING_MIN_COMBAT_SIGNAL_RATIO);
+  if (env.EVALUATION_STAGING_MIN_FILL_RATIO) next.evaluation.stagingMinFillRatio = parseFloat(env.EVALUATION_STAGING_MIN_FILL_RATIO);
+  if (env.EVALUATION_STAGING_MIN_JOIN_SUCCESS_RATE) next.evaluation.stagingMinJoinSuccessRate = parseFloat(env.EVALUATION_STAGING_MIN_JOIN_SUCCESS_RATE);
+  if (env.EVALUATION_STAGING_MIN_SHOT_RATE) next.evaluation.stagingMinShotRate = parseFloat(env.EVALUATION_STAGING_MIN_SHOT_RATE);
+  if (env.EVALUATION_STAGING_MIN_POLICY_SHARE) next.evaluation.stagingMinPolicyShare = parseFloat(env.EVALUATION_STAGING_MIN_POLICY_SHARE);
+  if (env.EVALUATION_STAGING_MIN_DAMAGE_PER_SHOT) next.evaluation.stagingMinDamagePerShot = parseFloat(env.EVALUATION_STAGING_MIN_DAMAGE_PER_SHOT);
   if (env.SUPERVISOR_PORT) next.runtime.port = parseInt(env.SUPERVISOR_PORT, 10);
   if (env.COMBAT_RECOVERY_WINDOW) next.runtime.combatRecoveryWindow = parseInt(env.COMBAT_RECOVERY_WINDOW, 10);
   if (env.COMBAT_RECOVERY_MIN_SIGNAL_RATIO) next.runtime.combatRecoveryMinSignalRatio = parseFloat(env.COMBAT_RECOVERY_MIN_SIGNAL_RATIO);
   if (env.COMBAT_RECOVERY_COOLDOWN_MS) next.runtime.combatRecoveryCooldownMs = parseInt(env.COMBAT_RECOVERY_COOLDOWN_MS, 10);
+  if (env.STRATEGY_COACH_TIMEOUT_MS) next.runtime.strategyCoachTimeoutMs = parseInt(env.STRATEGY_COACH_TIMEOUT_MS, 10);
   if (env.BOT_ROSTER_PATH) next.persistence.rosterFile = env.BOT_ROSTER_PATH;
   if (env.OAUTH_API_KEY) next.server.authKey = env.OAUTH_API_KEY;
   if (env.OLLAMA_CLOUD_API_KEY) next.ollamaApiKey = env.OLLAMA_CLOUD_API_KEY;
@@ -105,13 +115,31 @@ function validateEnvContract(config, env = process.env) {
     }
   }
 
-  for (const key of ["EVALUATION_SAMPLE_MATCHES", "COMBAT_RECOVERY_WINDOW", "COMBAT_RECOVERY_COOLDOWN_MS"]) {
+  for (const key of [
+    "EVALUATION_SAMPLE_MATCHES",
+    "EVALUATION_WINDOW_MINUTES",
+    "EVALUATION_AUTO_STAGE_MIN_VERSION_DELTA",
+    "EVALUATION_STAGING_RECENT_MATCHES",
+    "COMBAT_RECOVERY_WINDOW",
+    "COMBAT_RECOVERY_COOLDOWN_MS",
+    "STRATEGY_COACH_TIMEOUT_MS",
+  ]) {
     if (env[key] && !Number.isFinite(parseInt(env[key], 10))) {
       errors.push(`${key} must be numeric`);
     }
   }
 
-  for (const key of ["EVALUATION_PROMOTION_MARGIN", "EVALUATION_MIN_WIN_RATE", "COMBAT_RECOVERY_MIN_SIGNAL_RATIO"]) {
+  for (const key of [
+    "EVALUATION_PROMOTION_MARGIN",
+    "EVALUATION_MIN_WIN_RATE",
+    "EVALUATION_STAGING_MIN_COMBAT_SIGNAL_RATIO",
+    "EVALUATION_STAGING_MIN_FILL_RATIO",
+    "EVALUATION_STAGING_MIN_JOIN_SUCCESS_RATE",
+    "EVALUATION_STAGING_MIN_SHOT_RATE",
+    "EVALUATION_STAGING_MIN_POLICY_SHARE",
+    "EVALUATION_STAGING_MIN_DAMAGE_PER_SHOT",
+    "COMBAT_RECOVERY_MIN_SIGNAL_RATIO",
+  ]) {
     if (env[key] && !Number.isFinite(parseFloat(env[key]))) {
       errors.push(`${key} must be numeric`);
     }

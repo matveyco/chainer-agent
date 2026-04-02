@@ -278,6 +278,18 @@ app.post("/api/promotion/candidate/:family", async (req, res) => {
   }
 });
 
+app.post("/api/promotion/challenger/:family", async (req, res) => {
+  try {
+    const data = await fetchJSON(TRAINER_URL, `/promotion/challenger/${req.params.family}`, {
+      method: "POST",
+      body: JSON.stringify(req.body || {}),
+    });
+    res.json(data);
+  } catch (err) {
+    res.status(err.status || 503).json({ error: err.message, payload: err.payload });
+  }
+});
+
 app.post("/api/promotion/champion/:family/approve", async (req, res) => {
   try {
     const data = await fetchJSON(TRAINER_URL, `/promotion/champion/${req.params.family}/approve`, {

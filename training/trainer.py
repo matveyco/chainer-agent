@@ -5,7 +5,7 @@ Single-host training service with:
   - shared policy families with agent/archetype conditioning
   - per-agent ONNX exports with baked bindings
   - filesystem-backed registry for families, agents, aliases, and evaluation reports
-  - promotion governance for latest / candidate / champion
+  - promotion governance for latest / challenger / candidate / champion
 """
 
 from __future__ import annotations
@@ -427,7 +427,7 @@ class PPOTrainer:
         self.last_export_at = None
         self.pending_exports: dict[tuple[str, int], threading.Event] = {}
         self.export_queue: queue.Queue[ExportRequest] = queue.Queue()
-        self.alias_defaults = {"latest": 0, "candidate": 0, "champion": 0}
+        self.alias_defaults = {"latest": 0, "challenger": 0, "candidate": 0, "champion": 0}
 
         POLICIES_DIR.mkdir(parents=True, exist_ok=True)
         AGENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -545,7 +545,8 @@ class PPOTrainer:
         }
 
     def _read_family_aliases(self, family_id: str) -> dict:
-        return _read_json(self._family_aliases_path(family_id), self.alias_defaults)
+        loaded = _read_json(self._family_aliases_path(family_id), self.alias_defaults)
+        return {**self.alias_defaults, **loaded}
 
     def _write_family_aliases(self, family_id: str, aliases: dict):
         path = self._family_aliases_path(family_id)
@@ -553,7 +554,8 @@ class PPOTrainer:
         path.write_text(json.dumps(aliases, indent=2))
 
     def _read_agent_aliases(self, agent_id: str) -> dict:
-        return _read_json(self._agent_aliases_path(agent_id), self.alias_defaults)
+        loaded = _read_json(self._agent_aliases_path(agent_id), self.alias_defaults)
+        return {**self.alias_defaults, **loaded}
 
     def _write_agent_aliases(self, agent_id: str, aliases: dict):
         path = self._agent_aliases_path(agent_id)
@@ -891,6 +893,7 @@ class PPOTrainer:
                     {
                         "family_id": family_id,
                         "model_version": version,
+                        "challenger": version == self.resolve_family_version(family_id, alias="challenger"),
                         "candidate": version == self.resolve_family_version(family_id, alias="candidate"),
                         "champion": version == self.resolve_family_version(family_id, alias="champion"),
                         "updated_at": time.time(),
@@ -939,6 +942,7 @@ class PPOTrainer:
                 family_model.eval()
                 self._save_family_checkpoint(request.family_id)
                 family_aliases["latest"] = request.model_version
+                family_aliases.setdefault("challenger", 0)
                 if family_aliases.get("candidate", 0) == 0:
                     family_aliases["candidate"] = request.model_version
                 if family_aliases.get("champion", 0) == 0:
@@ -981,6 +985,7 @@ class PPOTrainer:
 
                     agent_aliases = self._read_agent_aliases(agent_id)
                     agent_aliases["latest"] = request.model_version
+                    agent_aliases.setdefault("challenger", 0)
                     if agent_aliases.get("candidate", 0) == 0:
                         agent_aliases["candidate"] = request.model_version
                     if agent_aliases.get("champion", 0) == 0:
@@ -1126,7 +1131,7 @@ class PPOTrainer:
         family.train_steps = max_version
         family.bound_agents = set(self.agents.keys())
         self._save_family_checkpoint(DEFAULT_POLICY_FAMILY)
-        aliases = {"latest": max_version, "candidate": max_version, "champion": max_version}
+        aliases = {"latest": max_version, "challenger": 0, "candidate": max_version, "champion": max_version}
         self._write_family_aliases(DEFAULT_POLICY_FAMILY, aliases)
         for agent_id in self.agents:
             self._write_agent_aliases(agent_id, dict(aliases))
@@ -1178,11 +1183,22 @@ class PPOTrainer:
     # Evaluation + promotion
     def record_evaluation(self, payload: dict):
         family_id = payload["family_id"]
-        candidate_version = int(payload.get("candidate_version", self.resolve_family_version(family_id, alias="candidate") or 0))
+        staged_version = int(
+            payload.get(
+                "challenger_version",
+                payload.get(
+                    "candidate_version",
+                    self.resolve_family_version(family_id, alias="challenger")
+                    or self.resolve_family_version(family_id, alias="candidate")
+                    or 0,
+                ),
+            )
+        )
         payload = {
             **payload,
             "family_id": family_id,
-            "candidate_version": candidate_version,
+            "challenger_version": staged_version,
+            "candidate_version": int(payload.get("candidate_version", staged_version)),
             "recorded_at": time.time(),
         }
         _append_jsonl(EVALUATION_HISTORY, payload)
@@ -1190,14 +1206,15 @@ class PPOTrainer:
         family = self.get_or_create_family(family_id)
         family.last_eval_report = payload
 
-        eval_path = self._family_eval_path(family_id, candidate_version)
+        eval_path = self._family_eval_path(family_id, staged_version)
         existing = _read_json(
             eval_path,
             {
                 "family_id": family_id,
-                "model_version": candidate_version,
-                "candidate": True,
-                "champion": candidate_version == self.resolve_family_version(family_id, alias="champion"),
+                "model_version": staged_version,
+                "challenger": staged_version == self.resolve_family_version(family_id, alias="challenger"),
+                "candidate": staged_version == self.resolve_family_version(family_id, alias="candidate"),
+                "champion": staged_version == self.resolve_family_version(family_id, alias="champion"),
                 "updated_at": time.time(),
                 "reports": [],
             },
@@ -1206,6 +1223,12 @@ class PPOTrainer:
         existing.setdefault("reports", []).append(payload)
         eval_path.parent.mkdir(parents=True, exist_ok=True)
         eval_path.write_text(json.dumps(existing, indent=2))
+        self._save_family_checkpoint(family_id)
+        self._write_family_metadata(
+            family_id,
+            family.model_version,
+            {"aliases": self._read_family_aliases(family_id), "last_eval_report": payload},
+        )
 
     def get_evaluation_history(self, family_id: str | None = None, limit: int = 50):
         if not EVALUATION_HISTORY.exists():
@@ -1225,14 +1248,59 @@ class PPOTrainer:
 
     def promote_candidate(self, family_id: str, version: int | None = None):
         family = self.get_or_create_family(family_id)
-        target = int(version if version is not None else family.model_version)
         aliases = self._read_family_aliases(family_id)
+        target = int(version if version is not None else aliases.get("challenger") or family.model_version)
+        if target <= 0:
+            return {"ok": False, "error": "no candidate version available"}
+        latest_eval = family.last_eval_report or next(
+            reversed(self.get_evaluation_history(family_id, limit=1)),
+            None,
+        )
+        latest_eval_version = int((latest_eval or {}).get("candidate_version") or (latest_eval or {}).get("challenger_version") or 0)
+        if not latest_eval or not latest_eval.get("passed") or latest_eval_version != target:
+            return {"ok": False, "error": "candidate promotion requires a passing ladder result for the staged version"}
         aliases["candidate"] = target
         aliases["latest"] = max(aliases.get("latest", 0), target)
+        aliases["challenger"] = max(aliases.get("challenger", 0), target)
         self._write_family_aliases(family_id, aliases)
+        _append_jsonl(
+            PROMOTION_HISTORY,
+            {
+                "action": "promote_candidate",
+                "family_id": family_id,
+                "version": target,
+                "promoted_at": time.time(),
+            },
+        )
         for agent_id in family.bound_agents:
             agent_aliases = self._read_agent_aliases(agent_id)
             agent_aliases["candidate"] = target
+            agent_aliases["latest"] = max(agent_aliases.get("latest", 0), target)
+            agent_aliases["challenger"] = max(agent_aliases.get("challenger", 0), target)
+            self._write_agent_aliases(agent_id, agent_aliases)
+        return {"ok": True, "family_id": family_id, "aliases": aliases}
+
+    def stage_challenger(self, family_id: str, version: int | None = None):
+        family = self.get_or_create_family(family_id)
+        aliases = self._read_family_aliases(family_id)
+        target = int(version if version is not None else aliases.get("latest") or family.model_version)
+        if target <= 0:
+            return {"ok": False, "error": "no challenger version available"}
+        aliases["challenger"] = target
+        aliases["latest"] = max(aliases.get("latest", 0), target)
+        self._write_family_aliases(family_id, aliases)
+        _append_jsonl(
+            PROMOTION_HISTORY,
+            {
+                "action": "stage_challenger",
+                "family_id": family_id,
+                "version": target,
+                "staged_at": time.time(),
+            },
+        )
+        for agent_id in family.bound_agents:
+            agent_aliases = self._read_agent_aliases(agent_id)
+            agent_aliases["challenger"] = target
             agent_aliases["latest"] = max(agent_aliases.get("latest", 0), target)
             self._write_agent_aliases(agent_id, agent_aliases)
         return {"ok": True, "family_id": family_id, "aliases": aliases}
@@ -1397,9 +1465,14 @@ class PPOTrainer:
         families = []
         for family_id, family in self.families.items():
             aliases = self._read_family_aliases(family_id)
+            last_eval_report = family.last_eval_report or next(
+                reversed(self.get_evaluation_history(family_id, limit=1)),
+                None,
+            )
             families.append(
                 {
                     **family.get_summary(aliases),
+                    "last_eval_report": last_eval_report,
                     "champion_history": [
                         item
                         for item in self.get_promotion_history(family_id, limit=25)
@@ -1605,9 +1678,14 @@ def create_app(trainer: PPOTrainer):
     @app.route("/family/<family_id>/status", methods=["GET"])
     def family_status(family_id):
         family = trainer.get_or_create_family(family_id)
+        last_eval_report = family.last_eval_report or next(
+            reversed(trainer.get_evaluation_history(family_id, limit=1)),
+            None,
+        )
         return jsonify(
             {
                 **family.get_summary(trainer._read_family_aliases(family_id)),
+                "last_eval_report": last_eval_report,
                 "champion_history": trainer.get_promotion_history(family_id, limit=25),
                 "evaluation_history": trainer.get_evaluation_history(family_id, limit=25),
             }
@@ -1637,7 +1715,13 @@ def create_app(trainer: PPOTrainer):
     def candidate_promotion(family_id):
         body = request.get_json(silent=True) or {}
         result = trainer.promote_candidate(family_id, body.get("version"))
-        return jsonify(result)
+        return jsonify(result), (200 if result.get("ok") else 409)
+
+    @app.route("/promotion/challenger/<family_id>", methods=["POST"])
+    def challenger_promotion(family_id):
+        body = request.get_json(silent=True) or {}
+        result = trainer.stage_challenger(family_id, body.get("version"))
+        return jsonify(result), (200 if result.get("ok") else 409)
 
     @app.route("/promotion/champion/<family_id>/approve", methods=["POST"])
     def champion_approve(family_id):

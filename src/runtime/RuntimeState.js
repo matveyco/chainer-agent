@@ -55,7 +55,9 @@ class RuntimeState {
         llmAnalyses: 0,
         llmFailures: 0,
         inputsSent: 0,
+        shotsFired: 0,
         stateUpdates: 0,
+        tacticalOverrides: 0,
         evaluationRuns: 0,
         evaluationFailures: 0,
       },
@@ -72,6 +74,12 @@ class RuntimeState {
         current: null,
         queue: [],
         history: [],
+        schedule: {
+          nextWindowAt: null,
+          lastWindowAt: null,
+          activeWindow: false,
+          stagedChallengerVersion: 0,
+        },
       },
     };
     this.observationSamples = new Map();
@@ -135,6 +143,9 @@ class RuntimeState {
         mode: "training",
         jobId: null,
         templateId: null,
+        track: "training",
+        resolvedAlias: null,
+        resolvedVersion: 0,
       };
     }
     return this.state.rooms[roomIndex];
@@ -208,6 +219,12 @@ class RuntimeState {
       current: null,
       queue: [],
       history: [],
+      schedule: {
+        nextWindowAt: null,
+        lastWindowAt: null,
+        activeWindow: false,
+        stagedChallengerVersion: 0,
+      },
     }));
   }
 

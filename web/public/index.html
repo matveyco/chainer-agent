@@ -605,8 +605,8 @@
             : 'warn';
         return `<tr>
           <td>#${room.roomIndex}</td>
-          <td class="${statusClass}">${room.status || '-'}</td>
-          <td>${room.roomId || '<span class="muted">unassigned</span>'}</td>
+          <td class="${statusClass}">${room.status || '-'}<div class="tiny muted">${room.track || '-'} · ${room.resolvedAlias || '-'}</div></td>
+          <td>${room.roomId || '<span class="muted">unassigned</span>'}<div class="tiny muted">v${room.resolvedVersion || '-'}</div></td>
           <td>${room.assignedAgents || 0}/${room.targetAgents || 0}</td>
           <td>${room.connectedAgents || 0} <span class="tiny">(${Math.round((room.fillRatio || 0) * 100)}%)</span></td>
           <td>${room.livePlayers || 0}</td>
@@ -635,10 +635,14 @@
     function renderEvaluation() {
       const current = evaluationStatus.current;
       const queued = evaluationStatus.queue || [];
+      const schedule = evaluationStatus.schedule || {};
       const latest = evaluationHistory[0]?.report || null;
       const summary = [
         ['Current Job', current ? current.id : 'idle'],
         ['Queued Jobs', queued.length],
+        ['Next Window', schedule.nextWindowAt ? new Date(schedule.nextWindowAt).toLocaleString() : 'n/a'],
+        ['Active Window', schedule.activeWindow ? 'yes' : 'no'],
+        ['Staged Challenger', schedule.stagedChallengerVersion ? `v${schedule.stagedChallengerVersion}` : 'none'],
         ['Latest Pass', latest ? (latest.passed ? 'yes' : 'no') : 'n/a'],
         ['Latest Win Rate', latest ? `${Math.round((latest.win_rate || 0) * 100)}%` : 'n/a'],
         ['Latest Margin', latest ? `${Math.round((latest.score_margin || 0) * 100)}%` : 'n/a'],
@@ -659,7 +663,7 @@
           <td>${entry.id || report.job_id || '-'}</td>
           <td class="${statusClass}">${entry.status || 'unknown'}</td>
           <td>${entry.familyId || report.family_id || '-'}</td>
-          <td>v${entry.candidateVersion || report.candidate_version || '-'}</td>
+          <td>v${entry.challengerVersion || report.challenger_version || entry.candidateVersion || report.candidate_version || '-'}</td>
           <td>v${entry.championVersion || report.champion_version || '-'}</td>
           <td>${report.win_rate !== undefined ? `${Math.round(report.win_rate * 100)}%` : '-'}</td>
           <td>${report.score_margin !== undefined ? `${Math.round(report.score_margin * 100)}%` : '-'}</td>
@@ -677,10 +681,11 @@
             <span class="muted">v${family.model_version || 0}</span>
           </div>
           <div class="msg">
-            candidate v${family.aliases?.candidate ?? '-'} · champion v${family.aliases?.champion ?? '-'} ·
+            challenger v${family.aliases?.challenger ?? '-'} · candidate v${family.aliases?.candidate ?? '-'} · champion v${family.aliases?.champion ?? '-'} ·
             ${family.agent_count || 0} agents · ${family.train_steps || 0} train steps
           </div>
           <div class="controls" style="margin-top:10px;">
+            <button class="btn" onclick="stageChallenger('${family.family_id}')">Stage Challenger</button>
             <button class="btn" onclick="promoteCandidate('${family.family_id}')">Promote Candidate</button>
             <button class="btn success" onclick="approveChampion('${family.family_id}')">Approve Champion</button>
             <button class="btn danger" onclick="rejectChampion('${family.family_id}')">Reject Champion</button>
@@ -756,7 +761,7 @@
           <td class="${agent.avg_kd_50 >= 1 ? 'good' : 'danger'}">${agent.avg_kd_50}</td>
           <td>${agent.avg_damage_50 ?? 0}</td>
           <td>v${agent.model_version}</td>
-          <td class="tiny">L:${aliases.latest ?? '-'} C:${aliases.candidate ?? '-'} H:${aliases.champion ?? '-'}</td>
+          <td class="tiny">L:${aliases.latest ?? '-'} X:${aliases.challenger ?? '-'} C:${aliases.candidate ?? '-'} H:${aliases.champion ?? '-'}</td>
           <td>${agent.episodes}</td>
           <td>${agent.train_steps}</td>
           <td><div class="sparkline">${sparkline}</div></td>
@@ -806,6 +811,16 @@
         refreshAll();
       } catch (err) {
         setToast('Candidate promotion failed: ' + err.message);
+      }
+    }
+
+    async function stageChallenger(familyId) {
+      try {
+        await postJSON(`/api/promotion/challenger/${familyId}`, {});
+        setToast(`Challenger staged for ${familyId}`);
+        refreshAll();
+      } catch (err) {
+        setToast('Challenger staging failed: ' + err.message);
       }
     }
 
@@ -871,7 +886,7 @@
       document.getElementById('modal-content').innerHTML = `
         <div class="metric-list" style="margin-bottom:16px;">
           <div>Archetype<br><strong>${profile.personality?.archetype || 'unknown'}</strong></div>
-          <div>Model Aliases<br><strong>L:${aliases.latest ?? '-'} C:${aliases.candidate ?? '-'} H:${aliases.champion ?? '-'}</strong></div>
+          <div>Model Aliases<br><strong>L:${aliases.latest ?? '-'} X:${aliases.challenger ?? '-'} C:${aliases.candidate ?? '-'} H:${aliases.champion ?? '-'}</strong></div>
           <div>Current Plan<br><strong>${profile.current_plan || 'none'}</strong></div>
           <div>Schema / Version<br><strong>schema ${metadata.schema_version ?? '-'} · v${metadata.model_version ?? agent.model_version ?? '-'}</strong></div>
           <div>Episodes<br><strong>${agent.episodes || 0}</strong></div>

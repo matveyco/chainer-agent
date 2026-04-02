@@ -39,3 +39,24 @@ test("strategic brain clamps invalid numeric output", () => {
   assert.equal(parsed.strategy.aggression, 1);
   assert.equal(parsed.strategy.accuracy_focus, 0);
 });
+
+test("strategic brain starts from non-zero archetype defaults", () => {
+  const brain = new StrategicBrain("agent_7", "fake-key", undefined, { archetypeId: "collector" });
+  const strategy = brain.getStrategyVector();
+
+  assert.equal(strategy.crystal_priority > 0, true);
+  assert.equal(strategy.retreat_threshold > 0, true);
+});
+
+test("strategic brain times out bounded LLM calls", async (t) => {
+  const brain = new StrategicBrain("agent_3", "fake-key", undefined, { timeoutMs: 10 });
+  const originalFetch = global.fetch;
+  global.fetch = async (_url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+  });
+  t.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  await assert.rejects(() => brain._callLLM("test prompt"), /timeout/i);
+});

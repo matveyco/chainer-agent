@@ -9,7 +9,18 @@ class EvaluationManager {
   constructor({ config, runtimeState, roster, trainerUrl }) {
     this.config = config;
     this.runtimeState = runtimeState;
-    this.baseRoster = roster;
+    this.baseRoster = (roster || []).map((room, roomIndex) => (
+      Array.isArray(room)
+        ? {
+          roomIndex,
+          track: "evaluation",
+          label: `evaluation-${roomIndex}`,
+          resolvedAlias: "evaluation",
+          resolvedVersion: 0,
+          agents: room,
+        }
+        : room
+    ));
     this.trainerUrl = trainerUrl;
     this.historyLimit = config.evaluation?.historyLimit || 50;
     this.stateFile = path.resolve(config.persistence?.evaluationStateFile || "data/evaluation_state.json");
@@ -17,7 +28,21 @@ class EvaluationManager {
     this.queue = [];
     this.currentJob = null;
     this.history = [];
+    this.schedule = {
+      nextWindowAt: null,
+      lastWindowAt: null,
+      activeWindow: false,
+      stagedChallengerVersion: 0,
+    };
     this._load();
+  }
+
+  setScheduleState(patch = {}) {
+    this.schedule = {
+      ...this.schedule,
+      ...clone(patch),
+    };
+    this._persist();
   }
 
   queueRun(options = {}) {
@@ -30,6 +55,7 @@ class EvaluationManager {
       status: "queued",
       reason: options.reason || "manual",
       results: [],
+      challengerVersion: options.challengerVersion || null,
       candidateVersion: options.candidateVersion || null,
       championVersion: options.championVersion || null,
       templateIds: [],
@@ -51,26 +77,27 @@ class EvaluationManager {
     const familyStatus = await fetchFamilyStatus(familyId);
     if (!familyStatus?.aliases) return null;
 
-    const candidateVersion = familyStatus.aliases.candidate || 0;
-    if (candidateVersion <= 0) return null;
+    const challengerVersion = familyStatus.aliases.challenger || 0;
+    if (challengerVersion <= 0) return null;
 
     const alreadyQueued =
-      this.currentJob?.familyId === familyId && this.currentJob?.candidateVersion === candidateVersion
-      || this.queue.some((job) => job.familyId === familyId && job.candidateVersion === candidateVersion)
-      || this.history.some((job) => job.familyId === familyId && job.candidateVersion === candidateVersion);
+      this.currentJob?.familyId === familyId && this.currentJob?.challengerVersion === challengerVersion
+      || this.queue.some((job) => job.familyId === familyId && job.challengerVersion === challengerVersion)
+      || this.history.some((job) => job.familyId === familyId && job.challengerVersion === challengerVersion);
     if (alreadyQueued) return null;
 
     const job = this.queueRun({
       familyId,
       requestedBy: "auto",
       reason: "interval",
-      candidateVersion,
+      challengerVersion,
+      candidateVersion: challengerVersion,
       championVersion: familyStatus.aliases.champion || 0,
     });
     return job;
   }
 
-  async runNext({ runRoomBatch, fetchFamilyStatus, submitReport }) {
+  async runNext({ runRoomBatch, fetchFamilyStatus, submitReport, promoteCandidate }) {
     if (this.currentJob || this.queue.length === 0) return null;
 
     const job = this.queue.shift();
@@ -79,16 +106,21 @@ class EvaluationManager {
 
     job.status = "running";
     job.startedAt = new Date().toISOString();
-    job.candidateVersion = familyStatus?.aliases?.candidate || job.candidateVersion || 0;
+    job.challengerVersion = familyStatus?.aliases?.challenger || job.challengerVersion || 0;
+    job.candidateVersion = job.challengerVersion;
     job.championVersion = familyStatus?.aliases?.champion || job.championVersion || 0;
     job.templateIds = templates.map((template) => template.id);
     job.progress.total = templates.length * job.matchesPerTemplate;
     this.currentJob = job;
+    this.setScheduleState({
+      activeWindow: true,
+      stagedChallengerVersion: job.challengerVersion || 0,
+    });
     this._persist();
     this.runtimeState.recordEvent("info", "evaluation started", {
       jobId: job.id,
       familyId: job.familyId,
-      candidateVersion: job.candidateVersion,
+      challengerVersion: job.challengerVersion,
       championVersion: job.championVersion,
     });
 
@@ -115,6 +147,10 @@ class EvaluationManager {
       job.status = "completed";
       job.report = this._aggregateJob(job);
       await submitReport(job.report);
+      if (job.report.passed && typeof promoteCandidate === "function") {
+        await promoteCandidate(job.familyId, job.challengerVersion);
+        job.promotedCandidateVersion = job.challengerVersion;
+      }
       this.runtimeState.incrementCounter("evaluationRuns");
       this.runtimeState.recordEvent("info", "evaluation completed", {
         jobId: job.id,
@@ -132,6 +168,11 @@ class EvaluationManager {
         error: err.message,
       });
     } finally {
+      this.setScheduleState({
+        activeWindow: false,
+        lastWindowAt: new Date().toISOString(),
+        stagedChallengerVersion: job.challengerVersion || this.schedule.stagedChallengerVersion,
+      });
       this.history.unshift(clone(job));
       if (this.history.length > this.historyLimit) this.history.length = this.historyLimit;
       this.currentJob = null;
@@ -145,6 +186,7 @@ class EvaluationManager {
     return {
       current: this.currentJob ? clone(this.currentJob) : null,
       queue: this.queue.map(clone),
+      schedule: clone(this.schedule),
     };
   }
 
@@ -153,52 +195,61 @@ class EvaluationManager {
   }
 
   _buildTemplates(job, familyStatus) {
-    const historical = (familyStatus?.champion_history || [])
+    const historicalVersion = (familyStatus?.champion_history || [])
       .map((entry) => entry.candidate_version || entry.version || 0)
-      .filter((value) => value && value !== job.candidateVersion && value !== job.championVersion)
-      .slice(-1);
+      .filter((value) => value && value !== job.challengerVersion && value !== job.championVersion)
+      .slice(-1)[0] || job.championVersion;
 
     const baseTemplates = [
       {
-        id: "candidate-champion-split-a",
-        resolver: (index) => (index % 2 === 0 ? { alias: "candidate", side: "candidate" } : { alias: "champion", side: "champion" }),
+        id: "challenger-champion-split-a",
+        resolver: (index) => (index % 2 === 0 ? { alias: "challenger", side: "challenger" } : { alias: "champion", side: "champion" }),
       },
       {
-        id: "candidate-champion-split-b",
-        resolver: (index) => (index % 2 === 1 ? { alias: "candidate", side: "candidate" } : { alias: "champion", side: "champion" }),
+        id: "challenger-champion-split-b",
+        resolver: (index) => (index % 2 === 1 ? { alias: "challenger", side: "challenger" } : { alias: "champion", side: "champion" }),
+      },
+      {
+        id: "challenger-history-split",
+        resolver: (index) => (
+          index % 2 === 0
+            ? { alias: "challenger", side: "challenger" }
+            : { alias: "champion", side: "historical", version: historicalVersion }
+        ),
       },
     ];
 
-    if (historical[0]) {
-      baseTemplates.push({
-        id: "candidate-history-split",
-        resolver: (index) => (
-          index % 2 === 0
-            ? { alias: "candidate", side: "candidate" }
-            : { alias: "champion", side: "historical", version: historical[0] }
-        ),
-      });
-    }
-
     return baseTemplates.map((template) => ({
       id: template.id,
-      rooms: this.baseRoster.map((room) =>
-        room.map((agent, index) => {
+      rooms: this.baseRoster.map((room) => ({
+        roomIndex: room.roomIndex,
+        track: "evaluation",
+        label: `evaluation-${template.id}-${room.roomIndex}`,
+        resolvedAlias: "evaluation",
+        resolvedVersion: job.challengerVersion || 0,
+        agents: room.agents.map((agent, index) => {
           const side = template.resolver(index);
+          const resolvedVersion = side.version ?? (
+            side.alias === "challenger"
+              ? job.challengerVersion
+              : side.alias === "champion"
+                ? job.championVersion
+                : null
+          );
           return {
             ...agent,
             modelAlias: side.alias,
-            modelVersion: side.version ?? null,
+            modelVersion: resolvedVersion ?? null,
             evaluationSide: side.side,
           };
-        })
-      ),
+        }),
+      })),
     }));
   }
 
   _aggregateJob(job) {
     const perSide = {
-      candidate: { score: 0, kills: 0, deaths: 0, damage: 0, survival: 0, count: 0 },
+      challenger: { score: 0, kills: 0, deaths: 0, damage: 0, survival: 0, count: 0 },
       champion: { score: 0, kills: 0, deaths: 0, damage: 0, survival: 0, count: 0 },
       historical: { score: 0, kills: 0, deaths: 0, damage: 0, survival: 0, count: 0 },
     };
@@ -208,13 +259,13 @@ class EvaluationManager {
     for (const run of job.results) {
       for (const room of run.rooms) {
         const roomBuckets = {
-          candidate: { score: 0, count: 0 },
+          challenger: { score: 0, count: 0 },
           champion: { score: 0, count: 0 },
           historical: { score: 0, count: 0 },
         };
 
         for (const agent of room.agentResults || []) {
-          const side = agent.evaluationSide || "candidate";
+          const side = agent.evaluationSide || "challenger";
           if (!perSide[side]) continue;
           perSide[side].score += agent.score || 0;
           perSide[side].kills += agent.kills || 0;
@@ -227,23 +278,23 @@ class EvaluationManager {
         }
 
         const opponent = roomBuckets.champion.count > 0 ? "champion" : roomBuckets.historical.count > 0 ? "historical" : null;
-        if (roomBuckets.candidate.count > 0 && opponent) {
+        if (roomBuckets.challenger.count > 0 && opponent) {
           roomComparisons += 1;
-          const candidateAvg = roomBuckets.candidate.score / roomBuckets.candidate.count;
+          const candidateAvg = roomBuckets.challenger.score / roomBuckets.challenger.count;
           const opponentAvg = roomBuckets[opponent].score / roomBuckets[opponent].count;
           if (candidateAvg > opponentAvg) candidateRoomWins += 1;
         }
       }
     }
 
-    const candidateAvgScore = perSide.candidate.count ? perSide.candidate.score / perSide.candidate.count : 0;
+    const candidateAvgScore = perSide.challenger.count ? perSide.challenger.score / perSide.challenger.count : 0;
     const opponentBucket = perSide.champion.count ? perSide.champion : perSide.historical;
     const opponentAvgScore = opponentBucket.count ? opponentBucket.score / opponentBucket.count : 0;
     const scoreMargin = opponentAvgScore > 0 ? (candidateAvgScore - opponentAvgScore) / opponentAvgScore : (candidateAvgScore > 0 ? 1 : 0);
     const winRate = roomComparisons > 0 ? candidateRoomWins / roomComparisons : 0;
     const survivalRatio =
       opponentBucket.count > 0
-        ? (perSide.candidate.survival / Math.max(perSide.candidate.count, 1)) / (opponentBucket.survival / opponentBucket.count || 1)
+        ? (perSide.challenger.survival / Math.max(perSide.challenger.count, 1)) / (opponentBucket.survival / opponentBucket.count || 1)
         : 1;
     const passed =
       scoreMargin >= (this.config.evaluation?.promotionMargin || 0.05) &&
@@ -252,16 +303,22 @@ class EvaluationManager {
 
     return {
       family_id: job.familyId,
+      challenger_version: job.challengerVersion,
       candidate_version: job.candidateVersion,
       champion_version: job.championVersion,
       job_id: job.id,
       templates: job.templateIds,
       runs: job.results.length,
       room_comparisons: roomComparisons,
+      challenger: {
+        avg_score: +candidateAvgScore.toFixed(2),
+        avg_kd: +(perSide.challenger.kills / Math.max(perSide.challenger.deaths, 1)).toFixed(2),
+        avg_damage: +(perSide.challenger.damage / Math.max(perSide.challenger.count, 1)).toFixed(2),
+      },
       candidate: {
         avg_score: +candidateAvgScore.toFixed(2),
-        avg_kd: +(perSide.candidate.kills / Math.max(perSide.candidate.deaths, 1)).toFixed(2),
-        avg_damage: +(perSide.candidate.damage / Math.max(perSide.candidate.count, 1)).toFixed(2),
+        avg_kd: +(perSide.challenger.kills / Math.max(perSide.challenger.deaths, 1)).toFixed(2),
+        avg_damage: +(perSide.challenger.damage / Math.max(perSide.challenger.count, 1)).toFixed(2),
       },
       champion: {
         avg_score: +opponentAvgScore.toFixed(2),
@@ -287,7 +344,10 @@ class EvaluationManager {
 
     results.forEach((result, roomIndex) => {
       const summary = result?.summary;
-      const expectedAgents = template.rooms[roomIndex]?.length || 0;
+      const expectedAgents =
+        template.rooms[roomIndex]?.agents?.length
+        || template.rooms[roomIndex]?.length
+        || 0;
       if (!summary) {
         throw new Error(
           `evaluation ${job.id} ${template.id} iteration ${iteration}: room ${roomIndex} did not return a summary`
@@ -314,10 +374,10 @@ class EvaluationManager {
       roomIds.add(summary.roomId);
 
       const hasOpponent = summary.agentResults.some((agent) => ["champion", "historical"].includes(agent.evaluationSide));
-      const hasCandidate = summary.agentResults.some((agent) => agent.evaluationSide === "candidate");
+      const hasCandidate = summary.agentResults.some((agent) => ["challenger", "candidate"].includes(agent.evaluationSide));
       if (!hasCandidate || !hasOpponent) {
         throw new Error(
-          `evaluation ${job.id} ${template.id} iteration ${iteration}: room ${roomIndex} missing candidate/opponent sides`
+          `evaluation ${job.id} ${template.id} iteration ${iteration}: room ${roomIndex} missing challenger/opponent sides`
         );
       }
 
@@ -336,6 +396,10 @@ class EvaluationManager {
         const state = JSON.parse(fs.readFileSync(this.stateFile, "utf-8"));
         this.queue = state.queue || [];
         staleCurrent = state.current || null;
+        this.schedule = {
+          ...this.schedule,
+          ...(state.schedule || {}),
+        };
         this.currentJob = null;
       }
       if (fs.existsSync(this.historyFile)) {
@@ -360,7 +424,7 @@ class EvaluationManager {
     fs.mkdirSync(path.dirname(this.stateFile), { recursive: true });
     fs.writeFileSync(
       this.stateFile,
-      JSON.stringify({ current: this.currentJob, queue: this.queue }, null, 2)
+      JSON.stringify({ current: this.currentJob, queue: this.queue, schedule: this.schedule }, null, 2)
     );
     if (this.history.length > 0) {
       fs.mkdirSync(path.dirname(this.historyFile), { recursive: true });

@@ -2,72 +2,89 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  computeCombatSignalRatio,
-  selectSafeRecoveryVersion,
-  shouldQueueAutomaticEvaluation,
+  resolveStableModelAlias,
+  shouldStageChallenger,
 } = require("../src/runtime/Automation");
 
-test("automation computes combat signal ratio from recent matches", () => {
-  const ratio = computeCombatSignalRatio([
-    { hasCombatSignal: true },
-    { totalDamageDealt: 12 },
-    { totalKills: 0, totalDeaths: 0, totalScore: 0 },
-    { totalScore: 50 },
-  ]);
+test("stable track falls back to champion when candidate is stale", () => {
+  assert.equal(resolveStableModelAlias({
+    aliases: { candidate: 12, champion: 7 },
+    last_eval_report: { passed: false, candidate_version: 12 },
+  }, {
+    training: { stableFallbackAlias: "champion" },
+  }), "champion");
 
-  assert.equal(ratio, 0.75);
+  assert.equal(resolveStableModelAlias({
+    aliases: { candidate: 12, champion: 7 },
+    last_eval_report: { passed: true, candidate_version: 12 },
+  }, {
+    training: { stableFallbackAlias: "champion" },
+  }), "candidate");
 });
 
-test("automation prefers latest passed evaluation version for recovery", () => {
-  const version = selectSafeRecoveryVersion({
-    aliases: { champion: 194 },
-    evaluation_history: [
-      { candidate_version: 1622, passed: true },
-      { candidate_version: 22930, passed: false },
-      { candidate_version: 13589, passed: true },
+test("challenger staging requires healthy recent live metrics", () => {
+  const verdict = shouldStageChallenger({
+    familyStatus: {
+      aliases: { latest: 2500, challenger: 1000, candidate: 900, champion: 800 },
+      last_eval_report: { candidate_version: 1000, challenger_version: 1000, passed: false },
+    },
+    recentMatches: [
+      {
+        mode: "training",
+        track: "training",
+        hasCombatSignal: true,
+        fillRatio: 1,
+        totalShotsFired: 30,
+        totalDecisionsMade: 300,
+        totalTacticalOverrides: 100,
+        totalDamageDealt: 120,
+      },
+      {
+        mode: "training",
+        track: "training",
+        hasCombatSignal: true,
+        fillRatio: 1,
+        totalShotsFired: 25,
+        totalDecisionsMade: 260,
+        totalTacticalOverrides: 80,
+        totalDamageDealt: 100,
+      },
+      {
+        mode: "training",
+        track: "training",
+        hasCombatSignal: true,
+        fillRatio: 1,
+        totalShotsFired: 28,
+        totalDecisionsMade: 250,
+        totalTacticalOverrides: 75,
+        totalDamageDealt: 110,
+      },
+      {
+        mode: "training",
+        track: "training",
+        hasCombatSignal: true,
+        fillRatio: 1,
+        totalShotsFired: 32,
+        totalDecisionsMade: 280,
+        totalTacticalOverrides: 90,
+        totalDamageDealt: 130,
+      },
     ],
+    counters: { joinAttempts: 100, joinSuccesses: 99 },
+    config: {
+      evaluation: {
+        autoStageMinVersionDelta: 1000,
+        stagingRecentMatches: 4,
+        stagingMinCombatSignalRatio: 0.75,
+        stagingMinFillRatio: 0.95,
+        stagingMinJoinSuccessRate: 0.97,
+        stagingMinShotRate: 0.03,
+        stagingMinPolicyShare: 0.1,
+        stagingMinDamagePerShot: 0.25,
+      },
+    },
   });
 
-  assert.equal(version, 13589);
-});
-
-test("automation falls back to champion version when no passed evaluation exists", () => {
-  const version = selectSafeRecoveryVersion({
-    aliases: { champion: 194 },
-    evaluation_history: [{ candidate_version: 2000, passed: false }],
-  });
-
-  assert.equal(version, 194);
-});
-
-test("automation queues evaluation only for a new latest snapshot at the interval", () => {
-  assert.equal(shouldQueueAutomaticEvaluation({
-    totalMatches: 10,
-    selectionInterval: 10,
-    lastQueuedMatchCount: 8,
-    latestVersion: 150,
-    candidateVersion: 100,
-    hasCurrentJob: false,
-    queuedJobs: 0,
-  }), true);
-
-  assert.equal(shouldQueueAutomaticEvaluation({
-    totalMatches: 10,
-    selectionInterval: 10,
-    lastQueuedMatchCount: 10,
-    latestVersion: 150,
-    candidateVersion: 100,
-    hasCurrentJob: false,
-    queuedJobs: 0,
-  }), false);
-
-  assert.equal(shouldQueueAutomaticEvaluation({
-    totalMatches: 10,
-    selectionInterval: 10,
-    lastQueuedMatchCount: 0,
-    latestVersion: 150,
-    candidateVersion: 150,
-    hasCurrentJob: false,
-    queuedJobs: 0,
-  }), false);
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.metrics.latestVersion, 2500);
 });

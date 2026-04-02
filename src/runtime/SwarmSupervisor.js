@@ -8,10 +8,11 @@ const { EvaluationManager } = require("./EvaluationManager");
 const { SingleInstanceLock } = require("./SingleInstanceLock");
 const {
   computeCombatSignalRatio,
+  resolveStableModelAlias,
   selectSafeRecoveryVersion,
-  shouldQueueAutomaticEvaluation,
+  shouldStageChallenger,
 } = require("./Automation");
-const { loadRoster } = require("./Roster");
+const { countRosterAgents, flattenRosterAgents, loadRoster } = require("./Roster");
 const { StrategicBrain } = require("../bot/StrategicBrain");
 const logger = require("../utils/logger");
 
@@ -40,12 +41,23 @@ class SwarmSupervisor {
       roster: this.roster,
       trainerUrl: config.trainerUrl,
     });
+    this.defaultFamilyId = config.training?.defaultPolicyFamily || "arena-main";
+    this.evaluationWindowMs = Math.max(
+      60000,
+      Number(config.evaluation?.windowIntervalMinutes || 90) * 60 * 1000
+    );
     this.totalMatches = 0;
     this.selectionInterval = config.training?.selectionInterval || 10;
     this.numCull = config.training?.numCull || 5;
     this.lastAutoEvaluationMatchCount = 0;
     this.lastRecoveredVersion = 0;
     this.lastRecoveryAt = 0;
+    const existingSchedule = this.evaluationManager.getStatus().schedule || {};
+    if (!existingSchedule.nextWindowAt) {
+      this.evaluationManager.setScheduleState({
+        nextWindowAt: new Date(Date.now() + this.evaluationWindowMs).toISOString(),
+      });
+    }
   }
 
   async run() {
@@ -55,7 +67,7 @@ class SwarmSupervisor {
     this.runtimeState.setStatus("starting");
     this.runtimeState.recordEvent("info", "supervisor starting", {
       rosterRooms: this.roster.length,
-      totalAgents: this.roster.flat().length,
+      totalAgents: countRosterAgents(this.roster),
     });
     this._registerProcessHooks();
     this._initStrategicBrains();
@@ -80,7 +92,15 @@ class SwarmSupervisor {
         continue;
       }
 
-      await this._maybeQueueAutomaticEvaluation();
+      const familyStatus = await this._fetchFamilyStatus(this.defaultFamilyId).catch((err) => {
+        this.runtimeState.recordEvent("warn", "family status unavailable", {
+          familyId: this.defaultFamilyId,
+          error: err.message,
+        });
+        return null;
+      });
+
+      await this._maybeScheduleEvaluationWindow(familyStatus);
 
       let results = null;
       if (this.evaluationManager.currentJob || this.evaluationManager.queue.length > 0) {
@@ -89,10 +109,11 @@ class SwarmSupervisor {
           runRoomBatch: (rosters, options) => this._runRoomBatch(rosters, options),
           fetchFamilyStatus: (familyId) => this._fetchFamilyStatus(familyId),
           submitReport: (report) => this._submitEvaluationReport(report),
+          promoteCandidate: (familyId, version) => this._promoteCandidate(familyId, version),
         });
       } else {
-        this.runtimeState.setMode("training");
-        results = await this._runRoomBatch(this.roster, { mode: "training" });
+        this.runtimeState.setMode("dual-track");
+        results = await this._runRoomBatch(this._buildTrackedRoster(familyStatus), { mode: "training" });
       }
       this._refreshEvaluationSnapshot();
       await this._maybeRecoverGameplayRegression();
@@ -173,13 +194,14 @@ class SwarmSupervisor {
 
   _initStrategicBrains() {
     if (!this.config.ollamaApiKey) return;
-    for (const agent of this.roster.flat()) {
+    for (const agent of flattenRosterAgents(this.roster)) {
       this.strategicBrains.set(
         agent.agentId,
         new StrategicBrain(agent.agentId, this.config.ollamaApiKey, this.config.ollamaModel, {
           archetypeId: agent.archetypeId,
           trainerUrl: this.config.trainerUrl,
           reporter: this.runtimeState,
+          timeoutMs: this.config.runtime?.strategyCoachTimeoutMs || 3000,
         })
       );
     }
@@ -331,6 +353,27 @@ class SwarmSupervisor {
     return 1;
   }
 
+  _buildTrackedRoster(familyStatus) {
+    return this.roster.map((room) => {
+      const track = room.track || "training";
+      const resolvedAlias = track === "stable"
+        ? resolveStableModelAlias(familyStatus, this.config)
+        : "latest";
+      const resolvedVersion = Number(familyStatus?.aliases?.[resolvedAlias] || 0);
+      return {
+        ...room,
+        track,
+        resolvedAlias,
+        resolvedVersion,
+        agents: room.agents.map((agent) => ({
+          ...agent,
+          modelAlias: resolvedAlias,
+          modelVersion: resolvedVersion > 0 ? resolvedVersion : null,
+        })),
+      };
+    });
+  }
+
   async _runRoomBatch(roomRosters, options = {}) {
     const mode = options.mode || "training";
     const runSerially = mode === "evaluation" || this.config.rooms?.parallelTrainingBatches === false;
@@ -338,15 +381,19 @@ class SwarmSupervisor {
     if (runSerially) {
       const results = [];
       for (let roomIndex = 0; roomIndex < roomRosters.length; roomIndex++) {
+        const roomPlan = roomRosters[roomIndex];
         const coordinator = new RoomCoordinator({
-          roomIndex,
-          roster: roomRosters[roomIndex],
+          roomIndex: roomPlan.roomIndex ?? roomIndex,
+          roster: roomPlan.agents || roomPlan,
           config: this.config,
           runtimeState: this.runtimeState,
           strategicBrains: this.strategicBrains,
           mode,
           jobId: options.jobId || null,
           templateId: options.templateId || null,
+          track: roomPlan.track || (mode === "evaluation" ? "evaluation" : "training"),
+          resolvedAlias: roomPlan.resolvedAlias || null,
+          resolvedVersion: roomPlan.resolvedVersion || 0,
         });
 
         results.push(
@@ -367,15 +414,19 @@ class SwarmSupervisor {
 
     const roomPromises = [];
     for (let roomIndex = 0; roomIndex < roomRosters.length; roomIndex++) {
+      const roomPlan = roomRosters[roomIndex];
       const coordinator = new RoomCoordinator({
-        roomIndex,
-        roster: roomRosters[roomIndex],
+        roomIndex: roomPlan.roomIndex ?? roomIndex,
+        roster: roomPlan.agents || roomPlan,
         config: this.config,
         runtimeState: this.runtimeState,
         strategicBrains: this.strategicBrains,
         mode: options.mode || "training",
         jobId: options.jobId || null,
         templateId: options.templateId || null,
+        track: roomPlan.track || (mode === "evaluation" ? "evaluation" : "training"),
+        resolvedAlias: roomPlan.resolvedAlias || null,
+        resolvedVersion: roomPlan.resolvedVersion || 0,
       });
 
       roomPromises.push(
@@ -425,6 +476,17 @@ class SwarmSupervisor {
     return response.data;
   }
 
+  async _stageChallenger(familyId, version) {
+    const response = await fetchJSON(`${this.config.trainerUrl}/promotion/challenger/${familyId}`, {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    });
+    if (!response.ok) {
+      throw new Error(response.data?.error || `challenger staging HTTP ${response.status}`);
+    }
+    return response.data;
+  }
+
   async _restoreFamilyVersion(familyId, version, reason) {
     const response = await fetchJSON(`${this.config.trainerUrl}/family/${familyId}/restore`, {
       method: "POST",
@@ -441,51 +503,76 @@ class SwarmSupervisor {
     return response.data;
   }
 
-  async _maybeQueueAutomaticEvaluation() {
+  async _maybeScheduleEvaluationWindow(familyStatus) {
     try {
       if (this.evaluationManager.currentJob || this.evaluationManager.queue.length > 0) {
         return null;
       }
-      if (this.totalMatches <= 0 || this.totalMatches % this.selectionInterval !== 0) {
+      if (!familyStatus?.aliases) {
         return null;
       }
 
-      const familyId = this.config.training?.defaultPolicyFamily || "arena-main";
-      const familyStatus = await this._fetchFamilyStatus(familyId);
-      const latestVersion = Number(familyStatus?.aliases?.latest || 0);
-      const candidateVersion = Number(familyStatus?.aliases?.candidate || 0);
+      const schedule = this.evaluationManager.getStatus().schedule || {};
+      const nextWindowAt = Date.parse(schedule.nextWindowAt || "");
+      if (!Number.isFinite(nextWindowAt) || Date.now() < nextWindowAt) {
+        return null;
+      }
 
-      if (!shouldQueueAutomaticEvaluation({
-        totalMatches: this.totalMatches,
-        selectionInterval: this.selectionInterval,
-        lastQueuedMatchCount: this.lastAutoEvaluationMatchCount,
-        latestVersion,
-        candidateVersion,
+      const recentMatches = this.runtimeState
+        .getMatchSummariesSnapshot(this.config.evaluation?.stagingRecentMatches || 4)
+        .filter((match) => match.mode === "training" && match.track === "training")
+        .slice(0, this.config.evaluation?.stagingRecentMatches || 4);
+      const stageDecision = shouldStageChallenger({
+        familyStatus,
+        recentMatches,
+        counters: this.runtimeState.getSystemSnapshot().counters,
+        config: this.config,
         hasCurrentJob: Boolean(this.evaluationManager.currentJob),
         queuedJobs: this.evaluationManager.queue.length,
-      })) {
+      });
+
+      if (!stageDecision.ok) {
+        this.evaluationManager.setScheduleState({
+          nextWindowAt: new Date(Date.now() + this.evaluationWindowMs).toISOString(),
+          activeWindow: false,
+        });
+        this.runtimeState.recordEvent("info", "evaluation window skipped", {
+          familyId: this.defaultFamilyId,
+          reason: stageDecision.reason,
+          metrics: stageDecision.metrics || null,
+        });
         return null;
       }
 
-      await this._promoteCandidate(familyId, latestVersion);
+      const latestVersion = Number(familyStatus?.aliases?.latest || 0);
+      await this._stageChallenger(this.defaultFamilyId, latestVersion);
       const job = this.evaluationManager.queueRun({
-        familyId,
-        requestedBy: "auto",
-        reason: "interval",
+        familyId: this.defaultFamilyId,
+        requestedBy: "scheduler",
+        reason: "window",
+        challengerVersion: latestVersion,
         candidateVersion: latestVersion,
         championVersion: familyStatus.aliases?.champion || 0,
+        matchesPerTemplate: this.config.evaluation?.sampleMatches || 1,
       });
-      this.lastAutoEvaluationMatchCount = this.totalMatches;
+      this.evaluationManager.setScheduleState({
+        nextWindowAt: new Date(Date.now() + this.evaluationWindowMs).toISOString(),
+        stagedChallengerVersion: latestVersion,
+      });
       if (job) {
-        this.runtimeState.recordEvent("info", "automatic evaluation queued", {
+        this.runtimeState.recordEvent("info", "scheduled evaluation queued", {
           familyId: job.familyId,
-          candidateVersion: latestVersion,
-          totalMatches: this.totalMatches,
+          challengerVersion: latestVersion,
+          metrics: stageDecision.metrics,
         });
       }
       return job;
     } catch (err) {
-      this.runtimeState.recordEvent("warn", "automatic evaluation queue failed", {
+      this.evaluationManager.setScheduleState({
+        nextWindowAt: new Date(Date.now() + this.evaluationWindowMs).toISOString(),
+        activeWindow: false,
+      });
+      this.runtimeState.recordEvent("warn", "scheduled evaluation queue failed", {
         error: err.message,
       });
       return null;
@@ -500,7 +587,7 @@ class SwarmSupervisor {
     const cooldownMs = this.config.runtime?.combatRecoveryCooldownMs || 300000;
     const recentTrainingMatches = this.runtimeState
       .getMatchSummariesSnapshot(windowSize * 4)
-      .filter((match) => match.mode === "training")
+      .filter((match) => match.mode === "training" && match.track === "training")
       .slice(0, windowSize);
 
     if (recentTrainingMatches.length < windowSize) return null;

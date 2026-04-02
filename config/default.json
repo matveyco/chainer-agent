@@ -7,6 +7,7 @@
   },
   "rooms": {
     "count": 2,
+    "tracks": ["stable", "training"],
     "agentsPerRoom": 12,
     "parallelTrainingBatches": false,
     "staggerMs": 5000,
@@ -19,7 +20,9 @@
     "selectionInterval": 10,
     "numCull": 5,
     "defaultModelAlias": "latest",
-    "defaultPolicyFamily": "arena-main"
+    "defaultPolicyFamily": "arena-main",
+    "stableFallbackAlias": "champion",
+    "stablePreferredAlias": "candidate"
   },
   "fitness": {
     "killWeight": 100,
@@ -55,7 +58,8 @@
     "telemetryFlushMs": 1000,
     "combatRecoveryWindow": 4,
     "combatRecoveryMinSignalRatio": 0.25,
-    "combatRecoveryCooldownMs": 300000
+    "combatRecoveryCooldownMs": 300000,
+    "strategyCoachTimeoutMs": 3000
   },
   "persistence": {
     "savePopulationEvery": 10,
@@ -73,8 +77,17 @@
   "evaluation": {
     "minEpisodes": 10,
     "promotionMargin": 0.05,
-    "sampleMatches": 3,
+    "sampleMatches": 1,
     "minWinRate": 0.55,
-    "historyLimit": 50
+    "historyLimit": 50,
+    "windowIntervalMinutes": 90,
+    "autoStageMinVersionDelta": 1000,
+    "stagingRecentMatches": 4,
+    "stagingMinCombatSignalRatio": 0.75,
+    "stagingMinFillRatio": 0.95,
+    "stagingMinJoinSuccessRate": 0.97,
+    "stagingMinShotRate": 0.03,
+    "stagingMinPolicyShare": 0.1,
+    "stagingMinDamagePerShot": 0.25
   }
 }

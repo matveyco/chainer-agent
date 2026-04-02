@@ -31,7 +31,19 @@ function numberOrZero(value) {
 }
 
 class RoomCoordinator {
-  constructor({ roomIndex, roster, config, runtimeState, strategicBrains, mode = "training", jobId = null, templateId = null }) {
+  constructor({
+    roomIndex,
+    roster,
+    config,
+    runtimeState,
+    strategicBrains,
+    mode = "training",
+    jobId = null,
+    templateId = null,
+    track = "training",
+    resolvedAlias = null,
+    resolvedVersion = null,
+  }) {
     this.roomIndex = roomIndex;
     this.roster = roster;
     this.config = config;
@@ -40,6 +52,9 @@ class RoomCoordinator {
     this.mode = mode;
     this.jobId = jobId;
     this.templateId = templateId;
+    this.track = track;
+    this.resolvedAlias = resolvedAlias;
+    this.resolvedVersion = Number(resolvedVersion || 0);
     this.roomState = this.runtimeState.ensureRoom(roomIndex);
     this.requiredAgents = Math.max(
       1,
@@ -66,6 +81,9 @@ class RoomCoordinator {
       mode: this.mode,
       jobId: this.jobId,
       templateId: this.templateId,
+      track: this.track,
+      resolvedAlias: this.resolvedAlias,
+      resolvedVersion: this.resolvedVersion,
     });
 
     try {
@@ -81,6 +99,9 @@ class RoomCoordinator {
           mode: this.mode,
           jobId: this.jobId,
           templateId: this.templateId,
+          track: this.track,
+          resolvedAlias: this.resolvedAlias,
+          resolvedVersion: this.resolvedVersion,
         });
         return { connectedCount: 0, roomId: null };
       }
@@ -98,6 +119,9 @@ class RoomCoordinator {
           mode: this.mode,
           jobId: this.jobId,
           templateId: this.templateId,
+          track: this.track,
+          resolvedAlias: this.resolvedAlias,
+          resolvedVersion: this.resolvedVersion,
         });
         await this._cleanupSessions(sessions);
         return { connectedCount: connectedSessions.length, roomId: selection.roomId };
@@ -116,15 +140,18 @@ class RoomCoordinator {
         );
       }
 
-      this.runtimeState.updateRoom(this.roomIndex, {
-        status: "completed",
-        phase: "completed",
+        this.runtimeState.updateRoom(this.roomIndex, {
+          status: "completed",
+          phase: "completed",
         lastMatchEndedAt: new Date().toISOString(),
-        connectedAgents: connectedSessions.length,
-        mode: this.mode,
-        jobId: this.jobId,
-        templateId: this.templateId,
-      });
+          connectedAgents: connectedSessions.length,
+          mode: this.mode,
+          jobId: this.jobId,
+          templateId: this.templateId,
+          track: this.track,
+          resolvedAlias: this.resolvedAlias,
+          resolvedVersion: this.resolvedVersion,
+        });
 
       return {
         connectedCount: connectedSessions.length,
@@ -152,10 +179,11 @@ class RoomCoordinator {
         modelAlias: agent.modelAlias,
         modelVersion: agent.modelVersion,
         policyFamily: agent.policyFamily,
-        archetypeId: agent.archetypeId,
-        mode: this.mode,
-        reporter: this.runtimeState,
-      });
+          archetypeId: agent.archetypeId,
+          mode: this.mode,
+          track: this.track,
+          reporter: this.runtimeState,
+        });
 
       if (this.strategicBrains.has(agent.agentId)) {
         bot.strategicBrain = this.strategicBrains.get(agent.agentId);
@@ -267,6 +295,9 @@ class RoomCoordinator {
       mode: this.mode,
       jobId: this.jobId,
       templateId: this.templateId,
+      track: this.track,
+      resolvedAlias: this.resolvedAlias,
+      resolvedVersion: this.resolvedVersion,
     });
 
     return bestSelection;
@@ -309,6 +340,9 @@ class RoomCoordinator {
       mode: this.mode,
       jobId: this.jobId,
       templateId: this.templateId,
+      track: this.track,
+      resolvedAlias: this.resolvedAlias,
+      resolvedVersion: this.resolvedVersion,
     });
 
     const connectedSessions = [];
@@ -561,6 +595,9 @@ class RoomCoordinator {
       mode: this.mode,
       jobId: this.jobId,
       templateId: this.templateId,
+      track: this.track,
+      resolvedAlias: this.resolvedAlias,
+      resolvedVersion: this.resolvedVersion,
     });
   }
 
@@ -592,7 +629,7 @@ class RoomCoordinator {
         await session.bot.brain.reportEpisode(summary);
       }
 
-      if (session.bot.strategicBrain) {
+      if (session.bot.strategicBrain && this.track === "stable" && this.mode === "training") {
         this.strategicBrains.set(session.bot.agentId, session.bot.strategicBrain);
         await session.bot.strategicBrain.analyzeMatch(summary).catch(() => {});
       }
@@ -665,6 +702,7 @@ class RoomCoordinator {
       modelAlias: session.agent.modelAlias || session.bot.modelAlias,
       modelVersion: runtime.modelVersion || session.agent.loadedModelVersion || session.agent.modelVersion || 0,
       evaluationSide: session.agent.evaluationSide || null,
+      track: this.track,
       score: summary.score,
       kills: summary.kills,
       deaths: summary.deaths,
@@ -673,8 +711,12 @@ class RoomCoordinator {
       survivalTime: summary.survivalTime,
       abilitiesUsed: summary.abilitiesUsed,
       decisionsMade: runtime.decisionsMade || 0,
+      policyLedDecisions: runtime.policyLedDecisions || 0,
       shotsFired: runtime.shotsFired || 0,
+      shotRate: runtime.shotRate || 0,
       tacticalOverrides: runtime.tacticalOverrides || 0,
+      tacticalOverrideRatio: runtime.tacticalOverrideRatio || 0,
+      combatInactivityMs: runtime.combatInactivityMs || 0,
       inputsSent: runtime.inputsSent,
       stateUpdates: runtime.stateUpdates,
     };
@@ -690,15 +732,28 @@ class RoomCoordinator {
     const totalInputsSent = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.inputsSent), 0);
     const totalStateUpdates = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.stateUpdates), 0);
     const totalDecisionsMade = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.decisionsMade), 0);
+    const totalPolicyLedDecisions = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.policyLedDecisions), 0);
     const totalShotsFired = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.shotsFired), 0);
     const totalTacticalOverrides = agentResults.reduce((sum, agent) => sum + numberOrZero(agent.tacticalOverrides), 0);
+    const avgTacticalOverrideRatio = agentResults.length
+      ? agentResults.reduce((sum, agent) => sum + numberOrZero(agent.tacticalOverrideRatio), 0) / agentResults.length
+      : 0;
+    const avgCombatInactivityMs = agentResults.length
+      ? agentResults.reduce((sum, agent) => sum + numberOrZero(agent.combatInactivityMs), 0) / agentResults.length
+      : 0;
+    const shotRate = totalDecisionsMade > 0 ? totalShotsFired / totalDecisionsMade : 0;
+    const policyShare = totalDecisionsMade > 0 ? totalPolicyLedDecisions / totalDecisionsMade : 0;
+    const damagePerShot = totalShotsFired > 0 ? totalDamageDealt / totalShotsFired : 0;
     const hasCombatSignal = totalScore > 0 || totalDamageDealt > 0 || totalKills > 0 || totalDeaths > 0;
 
     return {
       roomIndex: this.roomIndex,
       mode: this.mode,
+      track: this.track,
       jobId: this.jobId,
       templateId: this.templateId,
+      resolvedAlias: this.resolvedAlias,
+      resolvedVersion: this.resolvedVersion,
       roomId: selection.roomId,
       publicAddress: cleanPublicAddress(selection.publicAddress),
       expectedAgents: this.roster.length,
@@ -715,8 +770,14 @@ class RoomCoordinator {
       totalInputsSent,
       totalStateUpdates,
       totalDecisionsMade,
+      totalPolicyLedDecisions,
       totalShotsFired,
       totalTacticalOverrides,
+      shotRate: +shotRate.toFixed(4),
+      policyShare: +policyShare.toFixed(4),
+      damagePerShot: +damagePerShot.toFixed(4),
+      avgTacticalOverrideRatio: +avgTacticalOverrideRatio.toFixed(4),
+      avgCombatInactivityMs: +avgCombatInactivityMs.toFixed(1),
       hasCombatSignal,
       winner: agentResults[0] || null,
       agentResults,

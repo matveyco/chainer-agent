@@ -23,6 +23,7 @@ class SmartBot {
     this.policyFamily = options.policyFamily || "arena-main";
     this.archetypeId = options.archetypeId || "tactician";
     this.mode = options.mode || "training";
+    this.track = options.track || "training";
     this.reporter = options.reporter || null;
     this.config = config;
     this.mapName = config.server.mapName;
@@ -40,6 +41,7 @@ class SmartBot {
           archetypeId: this.archetypeId,
           trainerUrl: config.trainerUrl,
           reporter: options.reporter || null,
+          timeoutMs: config.runtime?.strategyCoachTimeoutMs || 3000,
         }
       );
     }
@@ -360,16 +362,23 @@ class SmartBot {
   }
 
   getRuntimeStats() {
+    const policyLedDecisions = Math.max(0, this.decisionsMade - this.tacticalOverrides);
+    const shotRate = this.decisionsMade > 0 ? this.shotsFired / this.decisionsMade : 0;
     return {
       inputsSent: this._inputsSent,
       stateUpdates: this._stateUpdatesSeen,
       decisionsMade: this.decisionsMade,
+      policyLedDecisions,
       shotsFired: this.shotsFired,
+      shotRate: +shotRate.toFixed(4),
       tacticalOverrides: this.tacticalOverrides,
+      tacticalOverrideRatio: this.decisionsMade > 0 ? +(this.tacticalOverrides / this.decisionsMade).toFixed(4) : 0,
+      combatInactivityMs: Math.max(0, Date.now() - Math.max(this.lastCombatAt || 0, this.lastShotAt || 0)),
       modelAlias: this.modelAlias,
       modelVersion: this.brain?.modelVersion || 0,
       policyFamily: this.policyFamily,
       archetypeId: this.archetypeId,
+      track: this.track,
     };
   }
 

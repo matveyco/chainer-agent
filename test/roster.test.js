@@ -16,8 +16,10 @@ test("roster normalization chunks a flat agent list by room size", () => {
   });
 
   assert.equal(rooms.length, 2);
-  assert.equal(rooms[0][0].modelAlias, "champion");
-  assert.equal(rooms[1][0].agentId, "agent_2");
-  assert.equal(rooms[0][0].policyFamily, "arena-main");
-  assert.ok(rooms[0][0].archetypeId);
+  assert.equal(rooms[0].track, "stable");
+  assert.equal(rooms[1].track, "training");
+  assert.equal(rooms[0].agents[0].modelAlias, "champion");
+  assert.equal(rooms[1].agents[0].agentId, "agent_2");
+  assert.equal(rooms[0].agents[0].policyFamily, "arena-main");
+  assert.ok(rooms[0].agents[0].archetypeId);
 });
