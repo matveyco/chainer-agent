@@ -122,8 +122,60 @@ Rewards are shaped from:
 - survival
 - ability value
 - anti-suicide penalty
+- **terminal match-rank bonus** (`matchRankBonus`, default 25.0): added on the
+  last step of every match. +1.0 for the room winner, +0.5 for top quartile,
+  0 in the middle, -0.5 for bottom quartile, -1.0 for last place. This makes
+  PPO directly optimise for *winning* rather than for accumulated per-step
+  shaped reward (which previously over-rewarded shot accuracy).
 
 Episode reward totals are persisted for debugging.
+
+## Population-Based Training (PBT)
+
+Each agent owns its own `reward_weights` dict (the genome). PBT runs a
+genetic-algorithm-style exploit/explore step every `pbtInterval` matches
+(default 25) by hitting `POST /pbt/step` on the trainer:
+
+- Rank agents by composite fitness: rolling **win rate** (1.0× weight) plus
+  inverse normalised rank (0.25× weight).
+- The bottom cohort (`pbtFraction`, default 25%) clones the top cohort's
+  reward weights with multiplicative noise (`pbtMutationStrength`, ±20%).
+- Mutated weights are clamped to per-key bounds so the explore step can't
+  produce absurd values.
+- Each event is appended to `training_logs/pbt.jsonl` and the agent's
+  `pbt_generation` counter advances. Lineage (parent → child) is preserved.
+
+The supervisor also exposes `counters.pbtSteps` on `/system` so the
+dashboard can show total PBT cycles run.
+
+## League Roles
+
+Each agent has a `role` for league-style training (FTW Quake III recipe at
+small scale):
+
+- `main`: immune to PBT cloning. Preserves behavioural diversity.
+- `main_exploiter`: PBT-replaceable; designed to hunt the mains' weaknesses.
+- `league_exploiter`: PBT-replaceable; free agent.
+
+Default pattern across the population is `main, main_exploiter, league_exploiter,
+league_exploiter` repeating, which gives 6 mains / 6 main exploiters /
+12 league exploiters for a 24-agent roster. Override per agent in
+`config/roster.json`.
+
+Promotion is league-aware: `promote_candidate` requires the candidate to
+beat both the champion in eval AND the median rolling avg-score across the
+whole bound population, so a model can't get promoted on the strength of one
+favourable eval room while being mediocre live.
+
+## LLM Strategic Coach
+
+The LLM coach runs **between matches**, not in the hot path. Default model is
+`kimi-k2.5:cloud` (a reasoning model) — `strategyCoachTimeoutMs` defaults to
+90 seconds because reasoning models spend ~30s "thinking" before emitting
+their JSON answer. The coach updates bounded strategy parameters
+(`aggression`, `accuracy_focus`, `crystal_priority`, `ability_usage`,
+`retreat_threshold`) which are clamped to [0, 1] and persisted to the trainer
+via `POST /agent/<id>/strategy`.
 
 ## Project Structure
 
