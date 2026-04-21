@@ -47,8 +47,10 @@ GAE_LAMBDA = 0.95
 CLIP_EPSILON = 0.2
 ENTROPY_COEF = 0.01
 VALUE_COEF = 0.5
-PPO_EPOCHS = 2  # was 4 — lowered to reduce cross-epoch inplace gradient races
-                # that occasionally crash the gunicorn worker with SIGABRT.
+PPO_EPOCHS = 1  # Single-epoch PPO. Multi-epoch causes a cross-epoch in-place
+                # gradient race that crashes the gunicorn worker with SIGABRT/
+                # SIGSEGV every few hundred training steps. Sample efficiency
+                # drops slightly but trainer uptime jumps to indefinite.
 MODEL_SCHEMA_VERSION = 3
 LOG_STD_MIN = -5.0
 LOG_STD_MAX = 2.0
