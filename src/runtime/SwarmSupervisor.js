@@ -361,7 +361,7 @@ class SwarmSupervisor {
     try {
       const queueInfo = await this.matchmaker.getQueueToJoin();
       const payload = queueInfo.data || null;
-      return {
+      const status = {
         reachable: true,
         authorized: queueInfo.authorized,
         active: queueInfo.active,
@@ -374,6 +374,27 @@ class SwarmSupervisor {
         lastOkAt: new Date().toISOString(),
         lastError: queueInfo.authorized ? null : `queue-to-join unauthorized (${queueInfo.status})`,
       };
+
+      // Fallback: if queue-to-join is inactive (server hasn't seeded a queue),
+      // probe queue-status. If the configured room/map combo is exposed there,
+      // we are responsible for seeding it ourselves — match the original
+      // chainers loadtest behavior of using config defaults.
+      if (status.authorized && !status.active) {
+        try {
+          const queueStatus = await this.matchmaker.getQueueStatus();
+          const queues = queueStatus.data || {};
+          const roomName = this.config.server.roomName;
+          const mapName = this.config.server.mapName;
+          const key = `${roomName}-${mapName}`;
+          if (queueStatus.authorized && Object.prototype.hasOwnProperty.call(queues, key)) {
+            status.active = true;
+            status.queue = { roomName, mapName };
+            status.queueSource = "queue-status-fallback";
+          }
+        } catch {}
+      }
+
+      return status;
     } catch (err) {
       return {
         reachable: false,
