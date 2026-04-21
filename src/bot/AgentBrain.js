@@ -110,6 +110,13 @@ class AgentBrain {
       ability: transition.abilityUsed ? (this.rewardConfig.abilityValueWeight ?? 0.08) : 0,
       accuracy: transition.shotAccuracy * (this.rewardConfig.accuracyWeight ?? 0.2),
       antiSuicide: transition.died && !transition.gotKill ? (this.rewardConfig.antiSuicidePenalty ?? -0.3) : 0,
+      // Terminal match-rank bonus (only on done=true, when rank info is present).
+      // Rewards #1 finish, penalises last finish; tunable via reward.matchRankBonus.
+      matchRank:
+        transition.done && transition.rank > 0 && transition.roomSize > 0
+          ? this._computeRankReward(transition.rank, transition.roomSize) *
+            (this.rewardConfig.matchRankBonus ?? 1.0)
+          : 0,
     };
 
     const reward = Object.values(rewardComponents).reduce((sum, value) => sum + value, 0);
@@ -295,6 +302,8 @@ class AgentBrain {
         abilityUsed: !!args[0].abilityUsed,
         shotAccuracy: args[0].shotAccuracy || 0,
         done: !!args[0].done,
+        rank: args[0].rank || 0,
+        roomSize: args[0].roomSize || 0,
       };
     }
 
@@ -310,7 +319,28 @@ class AgentBrain {
       abilityUsed: false,
       shotAccuracy: 0,
       done: !!args[6],
+      rank: 0,
+      roomSize: 0,
     };
+  }
+
+  /**
+   * Map (rank, roomSize) → terminal reward signal in roughly [-1, +1].
+   *  rank=1            → +1.0
+   *  top 25% (incl 1)  → +0.5
+   *  middle half       → 0
+   *  bottom 25%        → -0.5
+   *  last              → -1.0
+   * Symmetric around the median so the trainer learns to target the top half.
+   */
+  _computeRankReward(rank, roomSize) {
+    if (roomSize <= 1) return 0;
+    if (rank === 1) return 1.0;
+    if (rank === roomSize) return -1.0;
+    const fraction = (rank - 1) / (roomSize - 1); // 0 best ... 1 worst
+    if (fraction <= 0.25) return 0.5;
+    if (fraction >= 0.75) return -0.5;
+    return 0;
   }
 
   _randomAction() {

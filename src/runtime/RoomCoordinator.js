@@ -659,8 +659,9 @@ class RoomCoordinator {
   }
 
   async _finalizeMatch(connectedSessions) {
-    const agentResults = [];
-    for (const session of connectedSessions) {
+    // First pass: collect summaries so we can compute final rank before
+    // pushing the terminal experience step into each agent's brain.
+    const sessionData = connectedSessions.map((session) => {
       const playerState = this._refreshPlayerData(session);
       const summary = {
         score: numberOrZero(playerState?.score),
@@ -671,6 +672,20 @@ class RoomCoordinator {
         survivalTime: numberOrZero(session.bot.fitness.survivalTime),
         abilitiesUsed: numberOrZero(session.bot.fitness.abilitiesUsed),
       };
+      return { session, summary };
+    });
+
+    // Rank by score (ties: stable order is fine — equal scores get adjacent ranks).
+    const ranked = [...sessionData].sort((left, right) => right.summary.score - left.summary.score);
+    const rankByAgentId = new Map();
+    ranked.forEach((entry, index) => {
+      rankByAgentId.set(entry.session.bot.agentId, index + 1);
+    });
+    const roomSize = sessionData.length;
+
+    const agentResults = [];
+    for (const { session, summary } of sessionData) {
+      const rank = rankByAgentId.get(session.bot.agentId) || 0;
 
       if (session.bot.brain) {
         session.bot.brain.recordStep({
@@ -681,17 +696,19 @@ class RoomCoordinator {
           damageTaken: 0,
           survivalSeconds: 0,
           done: true,
+          rank,
+          roomSize,
         });
         await session.bot.brain.flush();
-        await session.bot.brain.reportEpisode(summary);
+        await session.bot.brain.reportEpisode({ ...summary, rank, roomSize });
       }
 
       if (session.bot.strategicBrain && this.track === "stable" && this.mode === "training") {
         this.strategicBrains.set(session.bot.agentId, session.bot.strategicBrain);
-        await session.bot.strategicBrain.analyzeMatch(summary).catch(() => {});
+        await session.bot.strategicBrain.analyzeMatch({ ...summary, rank, roomSize }).catch(() => {});
       }
 
-      agentResults.push(this._buildAgentResult(session, summary));
+      agentResults.push({ ...this._buildAgentResult(session, summary), rank, roomSize });
     }
 
     this._persistProfiles();

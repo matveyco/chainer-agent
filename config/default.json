@@ -49,7 +49,8 @@
     "survivalWeight": 0.01,
     "accuracyWeight": 0.2,
     "abilityValueWeight": 0.08,
-    "antiSuicidePenalty": -0.3
+    "antiSuicidePenalty": -0.3,
+    "matchRankBonus": 25.0
   },
   "runtime": {
     "port": 3101,
@@ -59,7 +60,7 @@
     "combatRecoveryWindow": 4,
     "combatRecoveryMinSignalRatio": 0.25,
     "combatRecoveryCooldownMs": 300000,
-    "strategyCoachTimeoutMs": 3000
+    "strategyCoachTimeoutMs": 90000
   },
   "persistence": {
     "savePopulationEvery": 10,

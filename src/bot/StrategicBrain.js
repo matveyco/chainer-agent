@@ -147,7 +147,7 @@ class StrategicBrain {
       await this._persistStrategyDiff(parsed, diff);
     } catch (err) {
       this.reporter?.incrementCounter("llmFailures");
-      logger.debug(`[${this.agentId}] LLM failed: ${err.message}`);
+      logger.warn(`[${this.agentId}/${this.personality.archetype}] LLM coach failed: ${err.message}`);
     }
   }
 
