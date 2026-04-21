@@ -602,20 +602,63 @@ class RoomCoordinator {
 
   async _runMatchLoop(selection, connectedSessions) {
     let matchResolved = false;
+
+    // Track server-reported time-left so we don't quit a match the server is
+    // still running. The chainers room (TimeLimited) typically runs for
+    // ~10 minutes; the local matchTimeout is purely a safety net for the case
+    // where the server stops sending room:time updates entirely.
+    let lastTimeLeftMs = null;
+    let lastTimeUpdateAt = null;
+    const trackTime = (data) => {
+      if (data && Number.isFinite(data.left)) {
+        lastTimeLeftMs = Number(data.left);
+        lastTimeUpdateAt = Date.now();
+      }
+    };
+    for (const session of connectedSessions) {
+      session.room?.onMessage("room:time", trackTime);
+    }
+
     const matchEndPromise = new Promise((resolve) => {
       const primary = connectedSessions[0];
-      const finish = () => {
+      const finish = (reason) => {
         if (matchResolved) return;
         matchResolved = true;
+        if (reason) {
+          this.runtimeState.recordEvent("info", "match end", {
+            roomIndex: this.roomIndex,
+            reason,
+            lastTimeLeftMs,
+          });
+        }
         resolve();
       };
 
       if (primary?.room) {
-        primary.room.onMessage("room:dispose", finish);
-        primary.room.onLeave(finish);
+        primary.room.onMessage("room:dispose", () => finish("dispose"));
+        primary.room.onLeave(() => finish("leave"));
       }
 
-      setTimeout(finish, this.config.bot.matchTimeout);
+      // Safety-net poll: only force-end if (a) the server has gone silent on
+      // room:time for >60s AND we've waited at least matchTimeout, OR (b) the
+      // server explicitly reported left<=0. Otherwise trust the server clock.
+      const safetyMs = Math.max(this.config.bot.matchTimeout, 60000);
+      const watchdog = setInterval(() => {
+        if (matchResolved) {
+          clearInterval(watchdog);
+          return;
+        }
+        if (lastTimeLeftMs !== null && lastTimeLeftMs <= 0) {
+          clearInterval(watchdog);
+          finish("server-time-zero");
+          return;
+        }
+        const silentMs = lastTimeUpdateAt ? Date.now() - lastTimeUpdateAt : safetyMs;
+        if (silentMs >= safetyMs) {
+          clearInterval(watchdog);
+          finish("server-silent");
+        }
+      }, 5000);
     });
 
     let lastTime = performance.now();

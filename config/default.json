@@ -35,7 +35,7 @@
     "survivalTimeWeight": 0.5
   },
   "bot": {
-    "matchTimeout": 120000,
+    "matchTimeout": 900000,
     "respawnDelay": 3,
     "clientStaggerMs": 100,
     "decisionIntervalTicks": 3,
@@ -44,13 +44,13 @@
     "modelReloadBackoffMs": 10000
   },
   "reward": {
-    "scoreDeltaWeight": 0.02,
+    "scoreDeltaWeight": 0.05,
     "killBonus": 1,
     "deathPenalty": -0.75,
     "damageWeight": 0.004,
     "damageTakenPenalty": -0.002,
     "survivalWeight": 0.01,
-    "accuracyWeight": 0.2,
+    "accuracyWeight": 0.05,
     "abilityValueWeight": 0.08,
     "antiSuicidePenalty": -0.3,
     "matchRankBonus": 25.0

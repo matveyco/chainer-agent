@@ -71,14 +71,14 @@ DEVICE = torch.device("cpu")
 # exploit/explore mutates over time. Triggered by /pbt/step from the
 # supervisor on a schedule.
 REWARD_WEIGHT_DEFAULTS = {
-    "scoreDeltaWeight": 0.02,
+    "scoreDeltaWeight": 0.05,
     "killBonus": 1.0,
     "deathPenalty": -0.75,
     "damageWeight": 0.004,
     "damageTakenPenalty": -0.002,
     "survivalWeight": 0.01,
     "abilityValueWeight": 0.08,
-    "accuracyWeight": 0.2,
+    "accuracyWeight": 0.05,
     "antiSuicidePenalty": -0.3,
     "matchRankBonus": 25.0,
 }
@@ -1530,14 +1530,23 @@ class PPOTrainer:
         self._append_agent_history(agent_id)
 
     def _pbt_fitness(self, agent: AgentRecord) -> float:
-        """Composite fitness: win rate dominant, normalised rank as tiebreaker."""
-        win_rate = _safe_mean(agent.win_history)
-        # rank_history is in [0, 1] where 0 is best — invert so higher is better.
-        rank_signal = 1.0 - _safe_mean(agent.rank_history)
-        # Need at least a few episodes for the signal to be meaningful.
+        """Composite fitness:
+        - win_rate (1.0×) — direct "did we win the room?" signal
+        - rank_signal (0.25×) — normalised rank, tiebreaker for non-winners
+        - score_signal (0.5×) — normalised raw score, captures crystal-collection
+          performance (a Collector that gets 2000 score on average should beat a
+          Berserker that scores 600 even if neither tops the room often)
+        """
         if len(agent.win_history) < 3:
             return -math.inf
-        return win_rate * 1.0 + rank_signal * 0.25
+        win_rate = _safe_mean(agent.win_history)
+        rank_signal = 1.0 - _safe_mean(agent.rank_history)
+        # Normalise score on the [0, 3000] band — adjust if score ceiling moves.
+        # Score on chainers includes scoreForKills + scoreForCrystals + scoreForRank
+        # so this captures the full game objective, not just combat.
+        avg_score = _safe_mean(agent.score_history)
+        score_signal = max(0.0, min(1.0, avg_score / 3000.0))
+        return win_rate * 1.0 + rank_signal * 0.25 + score_signal * 0.5
 
     def pbt_step(self, fraction: float = 0.25, mutation_strength: float = 0.2):
         """One round of PBT exploit/explore.
