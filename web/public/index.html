@@ -425,13 +425,15 @@
         <thead>
           <tr>
             <th onclick="sortBy('agent_id')">Agent</th>
+            <th>Role</th>
             <th onclick="sortBy('avg_score_50')">Avg Score</th>
+            <th onclick="sortBy('win_rate_50')">Win %</th>
             <th onclick="sortBy('avg_kd_50')">Avg K/D</th>
             <th onclick="sortBy('avg_damage_50')">Avg Dmg</th>
             <th onclick="sortBy('model_version')">Version</th>
+            <th onclick="sortBy('pbt_generation')">PBT Gen</th>
             <th>Aliases</th>
             <th onclick="sortBy('episodes')">Episodes</th>
-            <th onclick="sortBy('train_steps')">Train Steps</th>
             <th>Score Trend</th>
             <th>Actions</th>
           </tr>
@@ -755,15 +757,22 @@
           `<div class="bar" style="height:${Math.max(5, (value / maxScore) * 58)}px" title="${value}"></div>`
         ).join('');
         const aliases = agent.aliases || {};
+        const role = agent.role || 'league_exploiter';
+        const roleClass = role === 'main' ? 'good' : role === 'main_exploiter' ? 'tiny' : 'tiny';
+        const winRate = agent.win_rate_50 != null ? Math.round(agent.win_rate_50 * 100) : 0;
+        const winClass = winRate >= 25 ? 'good' : winRate < 5 ? 'danger' : '';
+        const pbtGen = agent.pbt_generation || 0;
         return `<tr>
           <td><a href="#" onclick="openAgentModal('${agent.agent_id}');return false"><strong>${agent.agent_id}</strong></a></td>
+          <td class="${roleClass}">${role.replace('_', ' ')}</td>
           <td>${agent.avg_score_50}</td>
+          <td class="${winClass}">${winRate}%</td>
           <td class="${agent.avg_kd_50 >= 1 ? 'good' : 'danger'}">${agent.avg_kd_50}</td>
           <td>${agent.avg_damage_50 ?? 0}</td>
           <td>v${agent.model_version}</td>
+          <td>${pbtGen > 0 ? 'g' + pbtGen : '-'}</td>
           <td class="tiny">L:${aliases.latest ?? '-'} X:${aliases.challenger ?? '-'} C:${aliases.candidate ?? '-'} H:${aliases.champion ?? '-'}</td>
           <td>${agent.episodes}</td>
-          <td>${agent.train_steps}</td>
           <td><div class="sparkline">${sparkline}</div></td>
           <td>
             <button class="btn" onclick="openAgentModal('${agent.agent_id}')">View</button>
