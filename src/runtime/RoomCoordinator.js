@@ -180,11 +180,12 @@ class RoomCoordinator {
         modelAlias: agent.modelAlias,
         modelVersion: agent.modelVersion,
         policyFamily: agent.policyFamily,
-          archetypeId: agent.archetypeId,
-          mode: this.mode,
-          track: this.track,
-          reporter: this.runtimeState,
-        });
+        archetypeId: agent.archetypeId,
+        role: agent.role,
+        mode: this.mode,
+        track: this.track,
+        reporter: this.runtimeState,
+      });
 
       if (this.strategicBrains.has(agent.agentId)) {
         bot.strategicBrain = this.strategicBrains.get(agent.agentId);
