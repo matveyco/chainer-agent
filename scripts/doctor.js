@@ -14,6 +14,7 @@ const {
   validateRuntimeVersions,
 } = require("../src/runtime/ConfigContract");
 const { countRosterAgents, normalizeRosterDocument } = require("../src/runtime/Roster");
+const { runBotServiceProbe } = require("../src/network/BotServiceProbe");
 
 async function checkUrl(url) {
   const res = await fetch(url);
@@ -59,6 +60,7 @@ function inspectPythonEnvironment() {
       rooms: config.rooms?.count || 0,
       agentsPerRoom: config.rooms?.agentsPerRoom || 0,
       rosterFile: envCheck.rosterPath,
+      authConfigured: Boolean(config.server?.authKey),
     },
     roster: {
       ok: false,
@@ -95,7 +97,7 @@ function inspectPythonEnvironment() {
       ["supervisorHealth", `${process.env.SUPERVISOR_URL || `http://localhost:${process.env.SUPERVISOR_PORT || 3101}`}/healthz`],
       ["supervisorReady", `${process.env.SUPERVISOR_URL || `http://localhost:${process.env.SUPERVISOR_PORT || 3101}`}/readyz`],
       ["dashboardHealth", `http://localhost:${process.env.DASHBOARD_PORT || 3000}/healthz`],
-      ["arenaReachable", process.env.GAME_SERVER_URL],
+      ["arenaReachable", config.server?.endpoint],
     ];
 
     for (const [name, url] of checks) {
@@ -110,6 +112,32 @@ function inspectPythonEnvironment() {
         report.errors.push(`${name} failed: ${err.message}`);
       }
     }
+
+    if (config.server?.endpoint && config.server?.authKey) {
+      const protocol = await runBotServiceProbe({
+        endpoint: config.server.endpoint,
+        authKey: config.server.authKey,
+        weaponType: config.server.weaponType,
+        pollMs: 1000,
+        queueTimeoutMs: 8000,
+        assignmentTimeoutMs: 12000,
+        rttTimeoutMs: 4000,
+      });
+      report.live.protocol = protocol;
+      if (!protocol.ok) {
+        report.errors.push(
+          `protocol probe failed at ${protocol.failedStage || "unknown"}`
+        );
+      }
+    } else {
+      report.live.protocol = {
+        ok: false,
+        failedStage: "configuration",
+        error: "GAME_SERVER_URL or OAUTH_API_KEY missing",
+      };
+      report.errors.push("protocol probe unavailable: GAME_SERVER_URL or OAUTH_API_KEY missing");
+    }
+
     report.ok = report.errors.length === 0;
   }
 

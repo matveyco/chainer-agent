@@ -89,6 +89,20 @@ test("config contract applies evaluation and family env overrides", () => {
   assert.equal(config.runtime.strategyCoachTimeoutMs, 4000);
 });
 
+test("config contract supports documented compatibility aliases", () => {
+  const config = applyEnvOverrides(makeConfig(), {
+    ENDPOINT: "https://legacy-endpoint.example",
+    ROOM: "LegacyRoom",
+    NUM_CLIENTS: "18",
+    OAUTH_API_KEY: "secret",
+  });
+
+  assert.equal(config.server.endpoint, "https://legacy-endpoint.example");
+  assert.equal(config.server.roomName, "LegacyRoom");
+  assert.equal(config.rooms.agentsPerRoom, 18);
+  assert.equal(config.server.authKey, "secret");
+});
+
 test("config contract validates production env completeness and TLS safety", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "chainer-config-"));
   const rosterPath = path.join(tempDir, "roster.json");
@@ -108,6 +122,7 @@ test("config contract validates production env completeness and TLS safety", () 
     SELECTION_INTERVAL: "10",
     NUM_CULL: "5",
     BOT_ROSTER_PATH: rosterPath,
+    OAUTH_API_KEY: "secret",
     NODE_TLS_REJECT_UNAUTHORIZED: "0",
   };
 

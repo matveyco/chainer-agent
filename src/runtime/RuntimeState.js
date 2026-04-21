@@ -37,6 +37,16 @@ class RuntimeState {
         lastOkAt: null,
         lastError: null,
       },
+      matchmaker: {
+        reachable: false,
+        authorized: false,
+        active: false,
+        statusCode: null,
+        latencyMs: null,
+        lastOkAt: null,
+        lastError: null,
+        queue: null,
+      },
       counters: {
         queueJoinAttempts: 0,
         queueAssignments: 0,
@@ -119,6 +129,10 @@ class RuntimeState {
 
   setTrainerStatus(patch) {
     Object.assign(this.state.trainer, patch);
+  }
+
+  setMatchmakerStatus(patch) {
+    Object.assign(this.state.matchmaker, patch);
   }
 
   ensureRoom(roomIndex) {
@@ -237,6 +251,7 @@ class RuntimeState {
       config: this.state.config,
       supervisor: this.state.supervisor,
       trainer: this.state.trainer,
+      matchmaker: this.state.matchmaker,
       counters: this.state.counters,
       observations: this.state.observations,
     }));
@@ -268,6 +283,12 @@ class RuntimeState {
       `chainer_trainer_reachable ${this.state.trainer.reachable ? 1 : 0}`,
       "# TYPE chainer_trainer_ready gauge",
       `chainer_trainer_ready ${this.state.trainer.ready ? 1 : 0}`,
+      "# TYPE chainer_matchmaker_reachable gauge",
+      `chainer_matchmaker_reachable ${this.state.matchmaker.reachable ? 1 : 0}`,
+      "# TYPE chainer_matchmaker_authorized gauge",
+      `chainer_matchmaker_authorized ${this.state.matchmaker.authorized ? 1 : 0}`,
+      "# TYPE chainer_matchmaker_active gauge",
+      `chainer_matchmaker_active ${this.state.matchmaker.active ? 1 : 0}`,
     ];
 
     for (const [name, value] of Object.entries(this.state.counters)) {

@@ -14,6 +14,7 @@ const {
 } = require("./Automation");
 const { countRosterAgents, flattenRosterAgents, loadRoster } = require("./Roster");
 const { StrategicBrain } = require("../bot/StrategicBrain");
+const { Matchmaker } = require("../network/Matchmaker");
 const logger = require("../utils/logger");
 
 async function fetchJSON(url, options = {}) {
@@ -42,6 +43,10 @@ class SwarmSupervisor {
       trainerUrl: config.trainerUrl,
     });
     this.defaultFamilyId = config.training?.defaultPolicyFamily || "arena-main";
+    this.matchmaker = new Matchmaker(config.server?.endpoint, {
+      authKey: config.server?.authKey,
+      pollMs: config.rooms?.assignmentPollMs || 1500,
+    });
     this.evaluationWindowMs = Math.max(
       60000,
       Number(config.evaluation?.windowIntervalMinutes || 90) * 60 * 1000
@@ -52,6 +57,7 @@ class SwarmSupervisor {
     this.lastAutoEvaluationMatchCount = 0;
     this.lastRecoveredVersion = 0;
     this.lastRecoveryAt = 0;
+    this.lastQueueStateKey = null;
     this.claimedBackendRooms = new Map();
     const existingSchedule = this.evaluationManager.getStatus().schedule || {};
     if (!existingSchedule.nextWindowAt) {
@@ -93,6 +99,30 @@ class SwarmSupervisor {
         continue;
       }
 
+      const matchmakerStatus = await this._probeMatchmaker();
+      this.runtimeState.setMatchmakerStatus(matchmakerStatus);
+      this._recordQueueTransition(matchmakerStatus);
+
+      if (!matchmakerStatus.reachable) {
+        this.runtimeState.setStatus("waiting_for_queue");
+        await this._sleep(5000);
+        continue;
+      }
+
+      if (!matchmakerStatus.authorized) {
+        this.runtimeState.setStatus("waiting_for_queue");
+        await this._sleep(5000);
+        continue;
+      }
+
+      if (!matchmakerStatus.active || !matchmakerStatus.queue) {
+        this.runtimeState.setStatus("waiting_for_queue");
+        await this._sleep(5000);
+        continue;
+      }
+
+      this.runtimeState.setStatus("running");
+
       const familyStatus = await this._fetchFamilyStatus(this.defaultFamilyId).catch((err) => {
         this.runtimeState.recordEvent("warn", "family status unavailable", {
           familyId: this.defaultFamilyId,
@@ -107,14 +137,20 @@ class SwarmSupervisor {
       if (this.evaluationManager.currentJob || this.evaluationManager.queue.length > 0) {
         this.runtimeState.setMode("evaluation");
         results = await this.evaluationManager.runNext({
-          runRoomBatch: (rosters, options) => this._runRoomBatch(rosters, options),
+          runRoomBatch: (rosters, options) => this._runRoomBatch(rosters, {
+            ...options,
+            queuePlan: matchmakerStatus.queue,
+          }),
           fetchFamilyStatus: (familyId) => this._fetchFamilyStatus(familyId),
           submitReport: (report) => this._submitEvaluationReport(report),
           promoteCandidate: (familyId, version) => this._promoteCandidate(familyId, version),
         });
       } else {
         this.runtimeState.setMode("dual-track");
-        results = await this._runRoomBatch(this._buildTrackedRoster(familyStatus), { mode: "training" });
+        results = await this._runRoomBatch(this._buildTrackedRoster(familyStatus), {
+          mode: "training",
+          queuePlan: matchmakerStatus.queue,
+        });
       }
       this._refreshEvaluationSnapshot();
       await this._maybeRecoverGameplayRegression();
@@ -320,6 +356,60 @@ class SwarmSupervisor {
     }
   }
 
+  async _probeMatchmaker() {
+    const startedAt = Date.now();
+    try {
+      const queueInfo = await this.matchmaker.getQueueToJoin();
+      const payload = queueInfo.data || null;
+      return {
+        reachable: true,
+        authorized: queueInfo.authorized,
+        active: queueInfo.active,
+        statusCode: queueInfo.status,
+        latencyMs: Date.now() - startedAt,
+        queue: payload ? {
+          roomName: payload.roomName || null,
+          mapName: payload.mapName || null,
+        } : null,
+        lastOkAt: new Date().toISOString(),
+        lastError: queueInfo.authorized ? null : `queue-to-join unauthorized (${queueInfo.status})`,
+      };
+    } catch (err) {
+      return {
+        reachable: false,
+        authorized: false,
+        active: false,
+        statusCode: null,
+        latencyMs: Date.now() - startedAt,
+        queue: null,
+        lastOkAt: this.runtimeState.state.matchmaker?.lastOkAt || null,
+        lastError: err.message,
+      };
+    }
+  }
+
+  _recordQueueTransition(matchmakerStatus) {
+    const key = [
+      matchmakerStatus.reachable ? "reachable" : "unreachable",
+      matchmakerStatus.authorized ? "authorized" : "unauthorized",
+      matchmakerStatus.active ? "active" : "inactive",
+      matchmakerStatus.queue?.roomName || "-",
+      matchmakerStatus.queue?.mapName || "-",
+    ].join("|");
+
+    if (key === this.lastQueueStateKey) return;
+    this.lastQueueStateKey = key;
+    this.runtimeState.recordEvent("info", "queue-to-join status changed", {
+      reachable: matchmakerStatus.reachable,
+      authorized: matchmakerStatus.authorized,
+      active: matchmakerStatus.active,
+      roomName: matchmakerStatus.queue?.roomName || null,
+      mapName: matchmakerStatus.queue?.mapName || null,
+      statusCode: matchmakerStatus.statusCode,
+      error: matchmakerStatus.lastError || null,
+    });
+  }
+
   async _triggerSelection() {
     try {
       const response = await fetchJSON(`${this.config.trainerUrl}/select`, {
@@ -409,6 +499,7 @@ class SwarmSupervisor {
 
   async _runRoomBatch(roomRosters, options = {}) {
     const mode = options.mode || "training";
+    const queuePlan = options.queuePlan || null;
     const runSerially = mode === "evaluation" || this.config.rooms?.parallelTrainingBatches === false;
 
     if (runSerially) {
@@ -427,6 +518,7 @@ class SwarmSupervisor {
           track: roomPlan.track || (mode === "evaluation" ? "evaluation" : "training"),
           resolvedAlias: roomPlan.resolvedAlias || null,
           resolvedVersion: roomPlan.resolvedVersion || 0,
+          queuePlan,
           claimBackendRoom: (roomId, owner) => this._tryClaimBackendRoom(roomId, owner),
           releaseBackendRoom: (roomId, owner) => this._releaseBackendRoom(roomId, owner),
           getClaimedBackendRoomIds: (excludeRoomIndex) => this._getClaimedBackendRoomIds(excludeRoomIndex),
@@ -463,6 +555,7 @@ class SwarmSupervisor {
         track: roomPlan.track || (mode === "evaluation" ? "evaluation" : "training"),
         resolvedAlias: roomPlan.resolvedAlias || null,
         resolvedVersion: roomPlan.resolvedVersion || 0,
+        queuePlan,
         claimBackendRoom: (roomId, owner) => this._tryClaimBackendRoom(roomId, owner),
         releaseBackendRoom: (roomId, owner) => this._releaseBackendRoom(roomId, owner),
         getClaimedBackendRoomIds: (excludeRoomIndex) => this._getClaimedBackendRoomIds(excludeRoomIndex),

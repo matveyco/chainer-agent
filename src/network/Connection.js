@@ -8,11 +8,12 @@ const { Matchmaker } = require("./Matchmaker");
 const logger = require("../utils/logger");
 
 class Connection {
-  constructor(endpoint) {
+  constructor(endpoint, options = {}) {
     this.endpoint = endpoint;
-    this.matchmaker = new Matchmaker(endpoint);
+    this.matchmaker = new Matchmaker(endpoint, options);
     this.client = null;
     this.room = null;
+    this.userID = null;
   }
 
   /**
@@ -26,8 +27,10 @@ class Connection {
    * @returns {Object} room
    */
   async connect(userID, roomName, mapName, weaponType, forceCreateRoom = false, callbacks = {}) {
-    // Join matchmaking queue
-    const roomData = await this.matchmaker.join(userID, roomName, mapName, forceCreateRoom);
+    this.userID = userID;
+    const roomData = await this.matchmaker.reserveSeat(userID, roomName, mapName, {
+      forceCreateRoom,
+    });
 
     if (!roomData?.roomId || !roomData?.publicAddress) {
       throw new Error(`Invalid room data for ${userID}: ${JSON.stringify(roomData)}`);
@@ -38,10 +41,10 @@ class Connection {
     const clientEndpoint = `https://${host}`;
 
     this.client = new Client(clientEndpoint);
-    this.room = await this.client.joinById(roomData.roomId, {
-      userID,
-      weaponType,
-    });
+    this.room = await this.client.joinById(
+      roomData.roomId,
+      this.matchmaker.buildRoomJoinOptions({ userID, weaponType })
+    );
 
     logger.debug(`${userID} joined room ${this.room.roomId}`);
 
@@ -49,6 +52,33 @@ class Connection {
     this._setupHandlers(callbacks);
 
     return this.room;
+  }
+
+  async connectViaActiveQueue(userID, weaponType, options = {}) {
+    const {
+      queueTimeoutMs = 30000,
+      pollMs = 1000,
+      forceCreateRoom = false,
+      callbacks,
+      ...callbackOptions
+    } = options;
+    const queueInfo = await this.matchmaker.waitForActiveQueue({
+      timeoutMs: queueTimeoutMs,
+      pollMs,
+    });
+
+    if (!queueInfo?.active || !queueInfo?.data?.roomName) {
+      throw new Error("No active queue or open room was exposed by queue-to-join");
+    }
+
+    return this.connect(
+      userID,
+      queueInfo.data.roomName,
+      queueInfo.data.mapName,
+      weaponType,
+      Boolean(forceCreateRoom),
+      callbacks || callbackOptions
+    );
   }
 
   _setupHandlers(callbacks) {
@@ -114,7 +144,11 @@ class Connection {
       } catch {}
       this.room = null;
     }
+    if (this.userID) {
+      this.matchmaker.leaveQueue(this.userID).catch(() => {});
+    }
     this.client = null;
+    this.userID = null;
   }
 }
 

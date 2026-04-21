@@ -6,7 +6,7 @@ This repo now runs a supervised PPO bot swarm with:
 
 - shared-backbone PPO training with per-agent ONNX exports
 - match-boundary LLM strategy coaching in shadow mode
-- rostered model alias loading (`latest`, `candidate`, `champion`)
+- rostered model alias loading (`latest`, `challenger`, `candidate`, `champion`)
 - single-instance runtime locking
 - live operator telemetry for rooms, trainer health, joins, inputs, failures, evaluation, and promotion
 
@@ -88,6 +88,7 @@ models/agents/<agent_id>/aliases.json
 Alias support:
 
 - `latest`: newest exported policy
+- `challenger`: staged snapshot for the next ladder window
 - `candidate`: newest policy that passed sanity or ladder gates
 - `champion`: stable slot for curated/tournament play, updated only by explicit approval
 
@@ -188,15 +189,23 @@ Important variables:
 
 ```env
 GAME_SERVER_URL=https://ai-test-arena.chainers.io
+# ENDPOINT=https://ai-test-arena.chainers.io
 TRAINER_URL=http://localhost:5555
 SUPERVISOR_PORT=3101
 DASHBOARD_PORT=3000
 
 POPULATION_SIZE=12
+# NUM_CLIENTS=12
 NUM_ROOMS=2
 MATCH_TIMEOUT=120000
 SELECTION_INTERVAL=10
 NUM_CULL=5
+
+ROOM_NAME=TimeLimited
+# ROOM=TimeLimited
+MAP_NAME=arena
+WEAPON_TYPE=rocket
+OAUTH_API_KEY=...
 
 BOT_ROSTER_PATH=config/roster.json
 DEFAULT_POLICY_FAMILY=arena-main
@@ -210,8 +219,12 @@ LLM coaching:
 ```env
 OLLAMA_CLOUD_API_KEY=...
 DEEP_ANALYSIS_MODEL=kimi-k2.5:cloud
-OAUTH_API_KEY=...
 ```
+
+Matchmaker HTTP uses:
+
+- `Authorization: Bearer <OAUTH_API_KEY>` on `queue-to-join`, `join-queue`, `user-queue-position`, `leave-queue`, and `queue-status`
+- `OAuthAPIKey` in `joinById(...)` room options
 
 ## Roster Configuration
 
@@ -246,7 +259,7 @@ python training/trainer.py
 Terminal 2:
 
 ```bash
-node src/index.js
+npm run loadtest
 ```
 
 Terminal 3:
@@ -292,6 +305,7 @@ Services:
 - `GET /families`
 - `GET /family/:family_id/status`
 - `GET /family/:family_id/bindings`
+- `POST /promotion/challenger/:family_id`
 - `POST /promotion/candidate/:family_id`
 - `POST /promotion/champion/:family_id/approve`
 - `POST /promotion/champion/:family_id/reject`
@@ -300,8 +314,13 @@ Services:
 
 - `npm run doctor`
 - `node scripts/doctor.js --live --json`
-- `GET /rooms`
-- `GET /events`
+- live doctor/smoke runs now validate the external bot contract:
+  - authenticated `queue-to-join`
+  - seat reservation / assignment polling
+  - `joinById(...)` with `OAuthAPIKey`
+  - `room:player:loaded`
+  - `room:rtt`
+  - clean `leave-queue`
 
 ### Trainer
 
@@ -345,6 +364,13 @@ Run the smoke check against live/local services:
 
 ```bash
 npm run test:smoke
+```
+
+Doc-compatible wrappers:
+
+```bash
+npm run loadtest
+npm run loadtest:cluster
 ```
 
 Current automated coverage includes:

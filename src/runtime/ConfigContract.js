@@ -14,14 +14,27 @@ function loadConfig(configPath = path.resolve("config/default.json")) {
   return JSON.parse(fs.readFileSync(configPath, "utf-8"));
 }
 
+function envValue(env, primary, aliases = []) {
+  for (const key of [primary, ...aliases]) {
+    if (env[key] !== undefined && env[key] !== "") {
+      return env[key];
+    }
+  }
+  return undefined;
+}
+
 function applyEnvOverrides(config, env = process.env) {
   const next = JSON.parse(JSON.stringify(config));
-  next.server.endpoint = env.GAME_SERVER_URL || next.server.endpoint || null;
+  const endpoint = envValue(env, "GAME_SERVER_URL", ["ENDPOINT"]);
+  const roomName = envValue(env, "ROOM_NAME", ["ROOM"]);
+  const population = envValue(env, "POPULATION_SIZE", ["NUM_CLIENTS"]);
+
+  next.server.endpoint = endpoint || next.server.endpoint || null;
   next.trainerUrl = env.TRAINER_URL || next.trainerUrl || "http://localhost:5555";
-  if (env.ROOM_NAME) next.server.roomName = env.ROOM_NAME;
+  if (roomName) next.server.roomName = roomName;
   if (env.MAP_NAME) next.server.mapName = env.MAP_NAME;
   if (env.WEAPON_TYPE) next.server.weaponType = env.WEAPON_TYPE;
-  if (env.POPULATION_SIZE) next.rooms.agentsPerRoom = parseInt(env.POPULATION_SIZE, 10);
+  if (population) next.rooms.agentsPerRoom = parseInt(population, 10);
   if (env.MATCH_TIMEOUT) next.bot.matchTimeout = parseInt(env.MATCH_TIMEOUT, 10);
   if (env.NUM_ROOMS) next.rooms.count = parseInt(env.NUM_ROOMS, 10);
   if (env.SELECTION_INTERVAL) next.training.selectionInterval = parseInt(env.SELECTION_INTERVAL, 10);
@@ -59,6 +72,8 @@ function parseCliArgs(args) {
       flags.resume = args[i + 1] && !args[i + 1].startsWith("--") ? args[++i] : true;
     } else if (args[i] === "--watch") {
       flags.watch = args[i + 1] && !args[i + 1].startsWith("--") ? args[++i] : true;
+    } else if (args[i] === "--force-create-room") {
+      flags.forceCreateRoom = true;
     } else if (args[i] === "--population") {
       patches.population = parseInt(args[++i], 10);
     } else if (args[i] === "--endpoint") {
@@ -88,29 +103,49 @@ function validateEnvContract(config, env = process.env) {
   const warnings = [];
 
   const required = [
-    "GAME_SERVER_URL",
+    ["GAME_SERVER_URL", "ENDPOINT"],
     "TRAINER_URL",
     "SUPERVISOR_PORT",
     "DASHBOARD_PORT",
-    "ROOM_NAME",
+    ["ROOM_NAME", "ROOM"],
     "MAP_NAME",
     "WEAPON_TYPE",
-    "POPULATION_SIZE",
+    ["POPULATION_SIZE", "NUM_CLIENTS"],
     "MATCH_TIMEOUT",
     "NUM_ROOMS",
     "SELECTION_INTERVAL",
     "NUM_CULL",
     "BOT_ROSTER_PATH",
+    "OAUTH_API_KEY",
   ];
 
   for (const key of required) {
-    if (!env[key]) {
+    if (Array.isArray(key)) {
+      const [primary, ...aliases] = key;
+      if (envValue(env, primary, aliases) === undefined) {
+        errors.push(`${primary} is required`);
+      }
+      continue;
+    }
+    if (env[key] === undefined || env[key] === "") {
       errors.push(`${key} is required`);
     }
   }
 
-  for (const key of ["SUPERVISOR_PORT", "DASHBOARD_PORT", "POPULATION_SIZE", "MATCH_TIMEOUT", "NUM_ROOMS", "SELECTION_INTERVAL", "NUM_CULL"]) {
-    if (env[key] && !Number.isFinite(parseInt(env[key], 10))) {
+  const numericFields = [
+    ["SUPERVISOR_PORT"],
+    ["DASHBOARD_PORT"],
+    ["POPULATION_SIZE", "NUM_CLIENTS"],
+    ["MATCH_TIMEOUT"],
+    ["NUM_ROOMS"],
+    ["SELECTION_INTERVAL"],
+    ["NUM_CULL"],
+  ];
+  for (const field of numericFields) {
+    const [primary, ...aliases] = field;
+    const value = envValue(env, primary, aliases);
+    if (value !== undefined && !Number.isFinite(parseInt(value, 10))) {
+      const key = primary;
       errors.push(`${key} must be numeric`);
     }
   }

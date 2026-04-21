@@ -5,6 +5,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "loadtest": "node src/index.js",
+    "loadtest:cluster": "node src/index.js",
     "dashboard": "node web/server.js",
     "doctor": "node scripts/doctor.js",
     "test": "node --test test/*.test.js",

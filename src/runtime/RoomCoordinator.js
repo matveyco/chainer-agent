@@ -2,21 +2,8 @@ const { Client } = require("colyseus.js");
 const { SmartBot } = require("../bot/SmartBot");
 const { GameState } = require("../game/GameState");
 const { generateID } = require("../network/Protocol");
+const { Matchmaker } = require("../network/Matchmaker");
 const logger = require("../utils/logger");
-
-const JSON_HEADERS = { "Content-Type": "application/json" };
-
-async function fetchJSON(url, options = {}) {
-  const res = await fetch(url, {
-    ...options,
-    headers: { ...JSON_HEADERS, ...options.headers },
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok && res.status !== 404) {
-    throw new Error(`${options.method || "GET"} ${url} -> ${res.status} ${JSON.stringify(data)}`);
-  }
-  return data;
-}
 
 function cleanPublicAddress(value) {
   return String(value || "")
@@ -43,6 +30,7 @@ class RoomCoordinator {
     track = "training",
     resolvedAlias = null,
     resolvedVersion = null,
+    queuePlan = null,
     claimBackendRoom = null,
     releaseBackendRoom = null,
     getClaimedBackendRoomIds = null,
@@ -58,9 +46,14 @@ class RoomCoordinator {
     this.track = track;
     this.resolvedAlias = resolvedAlias;
     this.resolvedVersion = Number(resolvedVersion || 0);
+    this.queuePlan = queuePlan || null;
     this.claimBackendRoom = claimBackendRoom;
     this.releaseBackendRoom = releaseBackendRoom;
     this.getClaimedBackendRoomIds = getClaimedBackendRoomIds;
+    this.matchmaker = new Matchmaker(this.config.server.endpoint, {
+      authKey: this.config.server.authKey,
+      pollMs: this.config.rooms?.assignmentPollMs || 1500,
+    });
     this.claimedRoomId = null;
     this.roomState = this.runtimeState.ensureRoom(roomIndex);
     this.requiredAgents = Math.max(
@@ -217,26 +210,25 @@ class RoomCoordinator {
   }
 
   async _queueBots(sessions) {
-    const endpoint = this.config.server.endpoint;
+    const roomName = this.queuePlan?.roomName || this.config.server.roomName;
+    const mapName = this.queuePlan?.mapName || this.config.server.mapName;
     for (const session of sessions) {
-      await fetchJSON(`${endpoint}/matchmaker/join-queue`, {
-        method: "POST",
-        body: JSON.stringify({
-          userID: session.userID,
-          roomName: this.config.server.roomName,
-          mapName: this.config.server.mapName,
-          forceCreateRoom: false,
-        }),
-      });
+      const joined = await this.matchmaker.joinQueue(session.userID, roomName, mapName, false);
       session.queued = true;
       session.queuedAt = Date.now();
+      if (joined?.room) {
+        session.assignment = {
+          room: joined.room,
+          assignedAt: Date.now(),
+        };
+        this.runtimeState.incrementCounter("queueAssignments");
+      }
       this.runtimeState.incrementCounter("queueJoinAttempts");
       await this._sleep(this.config.bot.clientStaggerMs || 100);
     }
   }
 
   async _collectAssignments(sessions) {
-    const endpoint = this.config.server.endpoint;
     const deadline = Date.now() + (this.config.rooms?.assignmentTimeoutMs || 90000);
     const pollMs = this.config.rooms?.assignmentPollMs || 1500;
     let firstAssignmentAt = null;
@@ -248,9 +240,7 @@ class RoomCoordinator {
       if (unsettled.length > 0) {
         const responses = await Promise.all(unsettled.map(async (session) => {
           try {
-            const data = await fetchJSON(
-              `${endpoint}/matchmaker/user-queue-position/${session.userID}`
-            );
+            const data = await this.matchmaker.getQueuePosition(session.userID);
             return { session, data };
           } catch (err) {
             return { session, error: err };
@@ -724,12 +714,11 @@ class RoomCoordinator {
 
   async _leaveQueue(sessions) {
     if (!sessions.length) return;
-    const endpoint = this.config.server.endpoint;
     await Promise.all(sessions.map(async (session) => {
       if (!session.queued || session.queueLeft) return;
       session.queueLeft = true;
       try {
-        await fetch(`${endpoint}/matchmaker/leave-queue/${session.userID}`, { method: "DELETE" });
+        await this.matchmaker.leaveQueue(session.userID);
         this.runtimeState.incrementCounter("queueLeaves");
       } catch {}
     }));

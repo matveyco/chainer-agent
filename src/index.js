@@ -61,24 +61,26 @@ async function testConnect() {
   logger.info("Testing connection to", config.server.endpoint);
 
   const { Connection } = require("./network/Connection");
-  const conn = new Connection(config.server.endpoint);
+  const conn = new Connection(config.server.endpoint, {
+    authKey: config.server.authKey,
+  });
   const userID = `test_${generateID(6)}`;
+  const forceCreateRoom = Boolean(flags.forceCreateRoom || process.env.ALLOW_FORCE_CREATE_ROOM_FOR_DEV === "1");
 
   try {
-    const room = await conn.connect(
+    const room = await conn.connectViaActiveQueue(
       userID,
-      config.server.roomName,
-      config.server.mapName,
       config.server.weaponType,
-      true,
       {
+        forceCreateRoom,
+        queueTimeoutMs: 30000,
         onStateUpdate: (data) => logger.info("Got state update:", data.byteLength, "bytes"),
         onPlayerJoined: (data) => logger.info("Player joined:", data.userID),
         onPlayerDie: (data) => logger.info("Player died:", data.userID),
         onPlayerHit: (data) => logger.info("Player hit:", data.userID, "hp:", data.newHealth),
         onDispose: () => logger.info("Room disposed"),
         onLeave: (code) => logger.info("Left room, code:", code),
-      }
+      },
     );
 
     conn.sendLoaded(`TestBot_${userID.slice(-4)}`);
