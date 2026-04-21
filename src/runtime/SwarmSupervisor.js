@@ -376,17 +376,21 @@ class SwarmSupervisor {
       };
 
       // Fallback: if queue-to-join is inactive (server hasn't seeded a queue),
-      // probe queue-status. If the configured room/map combo is exposed there,
-      // we are responsible for seeding it ourselves — match the original
-      // chainers loadtest behavior of using config defaults.
+      // probe queue-status. If the matchmaker exposes ANY queue keyed by the
+      // configured roomName, we treat the queue as ready and seed it ourselves
+      // with the configured (roomName, mapName). Mirrors the original chainers
+      // loadtest behavior of using config defaults when queue-to-join is 404.
       if (status.authorized && !status.active) {
         try {
           const queueStatus = await this.matchmaker.getQueueStatus();
           const queues = queueStatus.data || {};
           const roomName = this.config.server.roomName;
           const mapName = this.config.server.mapName;
-          const key = `${roomName}-${mapName}`;
-          if (queueStatus.authorized && Object.prototype.hasOwnProperty.call(queues, key)) {
+          const prefix = `${roomName}-`;
+          const hasMatchingRoom =
+            queueStatus.authorized &&
+            Object.keys(queues).some((key) => key === `${roomName}-${mapName}` || key.startsWith(prefix));
+          if (hasMatchingRoom) {
             status.active = true;
             status.queue = { roomName, mapName };
             status.queueSource = "queue-status-fallback";
