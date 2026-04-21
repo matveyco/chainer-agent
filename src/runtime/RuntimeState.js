@@ -70,6 +70,8 @@ class RuntimeState {
         tacticalOverrides: 0,
         evaluationRuns: 0,
         evaluationFailures: 0,
+        pbtSteps: 0,
+        leagueMatches: 0,
       },
       observations: {
         queueWaitMsAvg: 0,

@@ -9,8 +9,27 @@ function getDefaultTrack(roomIndex, config) {
   return "training";
 }
 
+/**
+ * League roles used to bias PBT and (later) opponent sampling:
+ * - main:             never overwritten by PBT exploit; preserves diversity.
+ * - main_exploiter:   targets a main agent's weaknesses; PBT-replaceable.
+ * - league_exploiter: free agent, fully PBT-replaceable; default for new agents.
+ *
+ * Default assignment when nothing else is specified: every 4th agent is a main,
+ * the next is a main_exploiter, the rest are league_exploiters.
+ * For 24 agents that gives 6 main / 6 main_exploiter / 12 league_exploiter — a
+ * scaled-down approximation of the FTW Quake III recipe.
+ */
+const LEAGUE_ROLES = ["main", "main_exploiter", "league_exploiter"];
+const LEAGUE_DEFAULT_PATTERN = ["main", "main_exploiter", "league_exploiter", "league_exploiter"];
+
+function defaultLeagueRole(index) {
+  return LEAGUE_DEFAULT_PATTERN[index % LEAGUE_DEFAULT_PATTERN.length];
+}
+
 function normalizeAgent(agent, index, defaultAlias) {
   const archetype = getArchetypeByIndex(index);
+  const role = LEAGUE_ROLES.includes(agent.role) ? agent.role : defaultLeagueRole(index);
   return {
     agentId: agent.agentId || agent.id || `agent_${index}`,
     displayName: agent.displayName || agent.userName || agent.agentId || `agent_${index}`,
@@ -18,6 +37,7 @@ function normalizeAgent(agent, index, defaultAlias) {
     policyFamily: agent.policyFamily || agent.family || "arena-main",
     archetypeId: agent.archetypeId || archetype.id || DEFAULT_ARCHETYPE_ID,
     modelVersion: Number.isFinite(agent.modelVersion) ? agent.modelVersion : null,
+    role,
   };
 }
 
@@ -113,4 +133,6 @@ module.exports = {
   getDefaultTrack,
   loadRoster,
   normalizeRosterDocument,
+  LEAGUE_ROLES,
+  defaultLeagueRole,
 };

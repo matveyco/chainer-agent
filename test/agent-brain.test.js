@@ -101,6 +101,33 @@ test("agent brain matchRank symmetric: top quartile +0.5, bottom quartile -0.5",
   assert.equal(brain.experienceBuffer.at(-1).reward_components.matchRank, -0.5);
 });
 
+test("agent brain init fetches per-agent reward weights and merges them in", async (t) => {
+  const brain = new AgentBrain("agent_pbt", "http://localhost:5555", {
+    rewardConfig: { scoreDeltaWeight: 0.02, killBonus: 1.0 },
+  });
+  const originalFetch = global.fetch;
+  let fetchUrl = null;
+  global.fetch = async (url) => {
+    fetchUrl = String(url);
+    return {
+      ok: true,
+      json: async () => ({
+        reward_weights: { killBonus: 3.5, matchRankBonus: 50 },
+      }),
+    };
+  };
+  t.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  await brain._fetchRewardWeights();
+  assert.equal(fetchUrl.endsWith("/agent/agent_pbt/reward-weights"), true);
+  // Merge: untouched defaults stay, fetched values override.
+  assert.equal(brain.rewardConfig.scoreDeltaWeight, 0.02);
+  assert.equal(brain.rewardConfig.killBonus, 3.5);
+  assert.equal(brain.rewardConfig.matchRankBonus, 50);
+});
+
 test("agent brain reloads when trainer reports a different model version", async (t) => {
   const brain = new AgentBrain("agent_test", "http://localhost:5555");
   brain.modelVersion = 100;

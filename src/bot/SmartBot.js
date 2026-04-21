@@ -22,6 +22,7 @@ class SmartBot {
     this.modelVersion = options.modelVersion ?? null;
     this.policyFamily = options.policyFamily || "arena-main";
     this.archetypeId = options.archetypeId || "tactician";
+    this.role = options.role || "league_exploiter"; // PBT league role
     this.mode = options.mode || "training";
     this.track = options.track || "training";
     this.reporter = options.reporter || null;
@@ -109,6 +110,7 @@ class SmartBot {
       modelVersion: this.modelVersion,
       policyFamily: this.policyFamily,
       archetypeId: this.archetypeId,
+      role: this.role,
       rewardConfig: this.config.reward,
       reporter: this.reporter,
       strategyProvider: () => this.strategicBrain?.getStrategyVector?.() || null,

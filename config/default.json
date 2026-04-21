@@ -22,7 +22,10 @@
     "defaultModelAlias": "latest",
     "defaultPolicyFamily": "arena-main",
     "stableFallbackAlias": "champion",
-    "stablePreferredAlias": "candidate"
+    "stablePreferredAlias": "candidate",
+    "pbtInterval": 25,
+    "pbtFraction": 0.25,
+    "pbtMutationStrength": 0.2
   },
   "fitness": {
     "killWeight": 100,

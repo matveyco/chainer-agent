@@ -54,6 +54,10 @@ class SwarmSupervisor {
     this.totalMatches = 0;
     this.selectionInterval = config.training?.selectionInterval || 10;
     this.numCull = config.training?.numCull || 5;
+    this.pbtInterval = config.training?.pbtInterval || 25; // matches between PBT exploit/explore
+    this.pbtFraction = config.training?.pbtFraction ?? 0.25;
+    this.pbtMutationStrength = config.training?.pbtMutationStrength ?? 0.2;
+    this.lastPbtMatchCount = 0;
     this.lastAutoEvaluationMatchCount = 0;
     this.lastRecoveredVersion = 0;
     this.lastRecoveryAt = 0;
@@ -164,7 +168,38 @@ class SwarmSupervisor {
         }
       }
 
+      // PBT (genetic algorithm step) — trigger every pbtInterval completed matches.
+      if (this.totalMatches - this.lastPbtMatchCount >= this.pbtInterval) {
+        this.lastPbtMatchCount = this.totalMatches;
+        await this._triggerPbtStep();
+      }
+
       await this._sleep(this.config.rooms?.requeueBackoffMs || 3000);
+    }
+  }
+
+  async _triggerPbtStep() {
+    try {
+      const response = await fetchJSON(`${this.config.trainerUrl}/pbt/step`, {
+        method: "POST",
+        body: JSON.stringify({
+          fraction: this.pbtFraction,
+          mutation_strength: this.pbtMutationStrength,
+        }),
+      });
+      if (response.ok && response.data?.ok) {
+        this.runtimeState.incrementCounter("pbtSteps");
+        this.runtimeState.recordEvent("info", "pbt step complete", {
+          eventCount: response.data.events?.length || 0,
+          cohortSize: response.data.cohort_size,
+        });
+      } else {
+        this.runtimeState.recordEvent("info", "pbt step skipped", {
+          reason: response.data?.reason || `HTTP ${response.status}`,
+        });
+      }
+    } catch (err) {
+      this.runtimeState.recordEvent("warn", "pbt step failed", { error: err.message });
     }
   }
 

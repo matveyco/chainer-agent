@@ -65,6 +65,38 @@ TRAIN_STALL_SECONDS = 300
 EXPORT_STALL_SECONDS = 300
 DEVICE = torch.device("cpu")
 
+# PBT (Population-Based Training) — genetic algorithm operating on per-agent
+# reward weights. Each agent owns a copy of REWARD_WEIGHT_DEFAULTS that PBT
+# exploit/explore mutates over time. Triggered by /pbt/step from the
+# supervisor on a schedule.
+REWARD_WEIGHT_DEFAULTS = {
+    "scoreDeltaWeight": 0.02,
+    "killBonus": 1.0,
+    "deathPenalty": -0.75,
+    "damageWeight": 0.004,
+    "damageTakenPenalty": -0.002,
+    "survivalWeight": 0.01,
+    "abilityValueWeight": 0.08,
+    "accuracyWeight": 0.2,
+    "antiSuicidePenalty": -0.3,
+    "matchRankBonus": 25.0,
+}
+# Bounds keep mutated weights in a sensible range so the PBT explore step
+# can't push them to absurd values that break training.
+REWARD_WEIGHT_BOUNDS = {
+    "scoreDeltaWeight": (0.001, 0.5),
+    "killBonus": (0.1, 10.0),
+    "deathPenalty": (-5.0, -0.05),
+    "damageWeight": (0.0001, 0.05),
+    "damageTakenPenalty": (-0.05, -0.0001),
+    "survivalWeight": (0.0, 0.5),
+    "abilityValueWeight": (0.0, 1.0),
+    "accuracyWeight": (0.0, 5.0),
+    "antiSuicidePenalty": (-3.0, 0.0),
+    "matchRankBonus": (1.0, 200.0),
+}
+PBT_LOG = LOGS_DIR / "pbt.jsonl"
+
 ARCHETYPE_DEFAULTS = {
     "hunter": {"aggression": 0.9, "accuracy_focus": 0.4, "crystal_priority": 0.1, "ability_usage": 0.7, "retreat_threshold": 0.1},
     "sniper": {"aggression": 0.2, "accuracy_focus": 0.95, "crystal_priority": 0.2, "ability_usage": 0.3, "retreat_threshold": 0.4},
@@ -258,14 +290,25 @@ class AgentRecord:
         self.score_history: list[float] = []
         self.kd_history: list[float] = []
         self.damage_history: list[float] = []
+        self.win_history: list[int] = []  # 1 if rank==1 in match, 0 otherwise — PBT fitness signal
+        self.rank_history: list[float] = []  # rank/roomSize — secondary fitness signal
         self.last_strategy = {"strategy": _strategy_from_any(None, archetype_id)}
         self.last_reward_totals = {}
+        # Per-agent reward weights (genome). PBT mutates these.
+        self.reward_weights = dict(REWARD_WEIGHT_DEFAULTS)
+        self.pbt_generation = 0  # incremented on each PBT exploit step
+        self.pbt_lineage = []  # list of {parent: id, gen: n} for ancestry tracking
+        # League role: "main" (immune to PBT cloning), "main_exploiter", or "league_exploiter".
+        # Mains are preserved for diversity; exploiters get reset to winners by PBT.
+        self.role = "league_exploiter"
 
     def apply_binding(self, binding: dict):
         self.policy_family = binding.get("policy_family", self.policy_family)
         self.archetype_id = binding.get("archetype_id", self.archetype_id)
         if "strategy" in binding:
             self.last_strategy = {"strategy": _strategy_from_any(binding["strategy"], self.archetype_id)}
+        if binding.get("role") in ("main", "main_exploiter", "league_exploiter"):
+            self.role = binding["role"]
 
     def note_model_version(self, version: int, train_steps: int):
         self.model_version = int(version)
@@ -279,13 +322,20 @@ class AgentRecord:
         kills = float(summary.get("kills", 0))
         deaths = float(summary.get("deaths", 0))
         damage = float(summary.get("damageDealt", 0))
+        rank = int(summary.get("rank", 0) or 0)
+        room_size = int(summary.get("roomSize", 0) or 0)
         self.total_episodes += 1
         self.best_score = max(self.best_score, score)
         self.score_history.append(score)
         self.kd_history.append(kills / max(deaths, 1.0))
         self.damage_history.append(damage)
+        # PBT fitness: did we win this match? (rank == 1)
+        # Also track normalised rank in [0, 1] where 0 is best.
+        if rank > 0 and room_size > 0:
+            self.win_history.append(1 if rank == 1 else 0)
+            self.rank_history.append((rank - 1) / max(room_size - 1, 1))
         self.last_reward_totals = dict(summary.get("reward_totals", {}))
-        for history in [self.score_history, self.kd_history, self.damage_history]:
+        for history in [self.score_history, self.kd_history, self.damage_history, self.win_history, self.rank_history]:
             if len(history) > 50:
                 history.pop(0)
 
@@ -298,10 +348,22 @@ class AgentRecord:
         self.score_history = list(payload.get("score_history", self.score_history))
         self.kd_history = list(payload.get("kd_history", self.kd_history))
         self.damage_history = list(payload.get("damage_history", self.damage_history))
+        self.win_history = list(payload.get("win_history", self.win_history))
+        self.rank_history = list(payload.get("rank_history", self.rank_history))
         self.last_strategy = dict(payload.get("last_strategy", self.last_strategy))
         self.last_reward_totals = dict(payload.get("last_reward_totals", self.last_reward_totals))
         self.policy_family = payload.get("policy_family", self.policy_family)
         self.archetype_id = payload.get("archetype_id", self.archetype_id)
+        # Per-agent reward weights — restore if present, else keep defaults.
+        if isinstance(payload.get("reward_weights"), dict):
+            for key, default in REWARD_WEIGHT_DEFAULTS.items():
+                value = payload["reward_weights"].get(key, default)
+                self.reward_weights[key] = float(value) if value is not None else default
+        self.pbt_generation = int(payload.get("pbt_generation", self.pbt_generation))
+        if isinstance(payload.get("pbt_lineage"), list):
+            self.pbt_lineage = list(payload["pbt_lineage"])
+        if payload.get("role") in ("main", "main_exploiter", "league_exploiter"):
+            self.role = payload["role"]
 
     def get_stats(self, aliases: dict | None = None):
         return {
@@ -316,12 +378,18 @@ class AgentRecord:
             "avg_score_50": round(_safe_mean(self.score_history), 1),
             "avg_kd_50": round(_safe_mean(self.kd_history), 2),
             "avg_damage_50": round(_safe_mean(self.damage_history), 1),
+            "win_rate_50": round(_safe_mean(self.win_history), 3),
+            "avg_rank_50": round(_safe_mean(self.rank_history), 3),
             "buffer_size": 0,
             "score_history": self.score_history[-20:],
             "kd_history": [round(value, 2) for value in self.kd_history[-20:]],
             "aliases": aliases or {},
             "last_strategy": self.last_strategy,
             "last_reward_totals": self.last_reward_totals,
+            "reward_weights": dict(self.reward_weights),
+            "pbt_generation": self.pbt_generation,
+            "pbt_lineage": list(self.pbt_lineage[-5:]),
+            "role": self.role,
         }
 
 
@@ -598,7 +666,7 @@ class PPOTrainer:
         self._write_agent_aliases(agent_id, self._read_agent_aliases(agent_id))
         return agent
 
-    def ensure_binding(self, agent_id: str, policy_family=None, archetype_id=None, strategy_vector=None) -> dict:
+    def ensure_binding(self, agent_id: str, policy_family=None, archetype_id=None, strategy_vector=None, role=None) -> dict:
         binding = self.bindings.get(agent_id) or self._read_binding(agent_id) or self._default_binding(
             agent_id, policy_family, archetype_id
         )
@@ -606,6 +674,8 @@ class PPOTrainer:
             binding["policy_family"] = policy_family
         if archetype_id:
             binding["archetype_id"] = archetype_id
+        if role in ("main", "main_exploiter", "league_exploiter"):
+            binding["role"] = role
         if strategy_vector is not None:
             binding["strategy"] = _strategy_from_any(strategy_vector, binding["archetype_id"])
         else:
@@ -653,8 +723,8 @@ class PPOTrainer:
         return aliases.get(alias or "latest")
 
     # Training
-    def process_experience(self, agent_id: str, transitions: list, policy_family=None, archetype_id=None, strategy_vector=None):
-        binding = self.ensure_binding(agent_id, policy_family, archetype_id, strategy_vector)
+    def process_experience(self, agent_id: str, transitions: list, policy_family=None, archetype_id=None, strategy_vector=None, role=None):
+        binding = self.ensure_binding(agent_id, policy_family, archetype_id, strategy_vector, role=role)
         family = self.get_or_create_family(binding["policy_family"])
         agent = self.get_or_create_agent(agent_id, binding)
         agent_index, archetype_index = family.ensure_slots(agent_id, binding["archetype_id"])
@@ -1259,6 +1329,25 @@ class PPOTrainer:
         latest_eval_version = int((latest_eval or {}).get("candidate_version") or (latest_eval or {}).get("challenger_version") or 0)
         if not latest_eval or not latest_eval.get("passed") or latest_eval_version != target:
             return {"ok": False, "error": "candidate promotion requires a passing ladder result for the staged version"}
+
+        # League-aware gate: candidate's score must also beat the median of all
+        # bound agents' rolling avg_score so we don't promote a model that just
+        # happens to beat the champion in the eval room but is mediocre live.
+        candidate_avg = float(((latest_eval or {}).get("candidate") or {}).get("avg_score", 0))
+        bound_scores = []
+        for agent_id in family.bound_agents:
+            agent = self.agents.get(agent_id)
+            if agent and agent.score_history:
+                bound_scores.append(float(np.mean(agent.score_history)))
+        if bound_scores:
+            league_median = float(np.median(bound_scores))
+            if candidate_avg + 1e-6 < league_median:
+                return {
+                    "ok": False,
+                    "error": "candidate failed league median gate",
+                    "candidate_avg_score": round(candidate_avg, 1),
+                    "league_median_score": round(league_median, 1),
+                }
         aliases["candidate"] = target
         aliases["latest"] = max(aliases.get("latest", 0), target)
         aliases["challenger"] = max(aliases.get("challenger", 0), target)
@@ -1409,6 +1498,123 @@ class PPOTrainer:
         }
         _append_jsonl(PROMOTION_HISTORY, {"action": "reject", **payload})
         return {"ok": True, **payload}
+
+    # ───────────────────────────────────────────────────────────────────
+    # PBT — population-based training (genetic algorithm over reward weights)
+    # ───────────────────────────────────────────────────────────────────
+
+    def get_reward_weights(self, agent_id: str) -> dict:
+        """Return the agent's per-agent reward weights (creating defaults if needed)."""
+        binding = self.ensure_binding(agent_id)
+        agent = self.get_or_create_agent(agent_id, binding)
+        return dict(agent.reward_weights)
+
+    def set_reward_weights(self, agent_id: str, weights: dict):
+        binding = self.ensure_binding(agent_id)
+        agent = self.get_or_create_agent(agent_id, binding)
+        for key, default in REWARD_WEIGHT_DEFAULTS.items():
+            if key not in weights:
+                continue
+            try:
+                value = float(weights[key])
+            except Exception:
+                continue
+            if not math.isfinite(value):
+                continue
+            low, high = REWARD_WEIGHT_BOUNDS.get(key, (-math.inf, math.inf))
+            agent.reward_weights[key] = max(low, min(high, value))
+        self._append_agent_history(agent_id)
+
+    def _pbt_fitness(self, agent: AgentRecord) -> float:
+        """Composite fitness: win rate dominant, normalised rank as tiebreaker."""
+        win_rate = _safe_mean(agent.win_history)
+        # rank_history is in [0, 1] where 0 is best — invert so higher is better.
+        rank_signal = 1.0 - _safe_mean(agent.rank_history)
+        # Need at least a few episodes for the signal to be meaningful.
+        if len(agent.win_history) < 3:
+            return -math.inf
+        return win_rate * 1.0 + rank_signal * 0.25
+
+    def pbt_step(self, fraction: float = 0.25, mutation_strength: float = 0.2):
+        """One round of PBT exploit/explore.
+
+        - Rank agents by composite fitness (win_rate + rank).
+        - Bottom `fraction` of the population copy weights from a random top-`fraction` agent.
+        - The cloned reward weights are perturbed by ±mutation_strength (multiplicative).
+        - Policy network weights are also copied from the source family checkpoint
+          so the weak agent gets a head start, not just new reward shaping.
+        - Each event is logged to training_logs/pbt.jsonl for the dashboard.
+        """
+        if fraction <= 0 or fraction >= 0.5:
+            fraction = 0.25
+        with self.lock:
+            agents = [agent for agent in self.agents.values() if len(agent.win_history) >= 3]
+            if len(agents) < 4:
+                return {"ok": False, "reason": "not enough agents with episode history yet"}
+
+            ranked = sorted(agents, key=lambda agent: self._pbt_fitness(agent), reverse=True)
+            cohort = max(2, int(len(ranked) * fraction))
+            top = ranked[:cohort]
+            # League rule: "main" agents are immune to PBT cloning to preserve
+            # behavioural diversity. Exploiters are the ones that get reset.
+            replaceable = [a for a in ranked if a.role != "main"]
+            bottom = replaceable[-cohort:]
+            timestamp = time.time()
+            events = []
+
+            for index, weak in enumerate(bottom):
+                strong = top[index % len(top)]
+                if strong.agent_id == weak.agent_id:
+                    continue
+
+                # Exploit: copy reward weights AND policy weights (via family clone).
+                new_weights = {}
+                for key, value in strong.reward_weights.items():
+                    low, high = REWARD_WEIGHT_BOUNDS.get(key, (-math.inf, math.inf))
+                    perturbation = 1.0 + (np.random.uniform(-mutation_strength, mutation_strength))
+                    mutated = float(value) * perturbation
+                    new_weights[key] = max(low, min(high, mutated))
+                weak.reward_weights = new_weights
+
+                # If both share the same policy family, the policy NN weights are
+                # already shared via the family backbone. We mark the weak agent's
+                # bookkeeping so its bot reloads the model on the next match cycle.
+                weak.pbt_generation += 1
+                weak.pbt_lineage.append({
+                    "parent": strong.agent_id,
+                    "generation": weak.pbt_generation,
+                    "timestamp": timestamp,
+                    "fitness_parent": round(self._pbt_fitness(strong), 4),
+                    "fitness_self_before": round(self._pbt_fitness(weak), 4),
+                })
+                weak.pbt_lineage = weak.pbt_lineage[-20:]
+
+                # Reset short-window fitness so we measure the new genome cleanly.
+                weak.win_history.clear()
+                weak.rank_history.clear()
+
+                self._append_agent_history(weak.agent_id)
+                events.append({
+                    "child": weak.agent_id,
+                    "parent": strong.agent_id,
+                    "generation": weak.pbt_generation,
+                    "weights": new_weights,
+                })
+
+            entry = {
+                "timestamp": timestamp,
+                "fraction": fraction,
+                "mutation_strength": mutation_strength,
+                "cohort_size": cohort,
+                "events": events,
+                "ranked": [
+                    {"agent_id": a.agent_id, "fitness": round(self._pbt_fitness(a), 4)}
+                    for a in ranked
+                ],
+            }
+            _append_jsonl(PBT_LOG, entry)
+            print(f"[PBT] generation step: cloned {len(events)} weak agents from top {cohort}")
+            return {"ok": True, **entry}
 
     # Management
     def reset_agent(self, agent_id: str):
@@ -1581,6 +1787,7 @@ def create_app(trainer: PPOTrainer):
             policy_family=data.get("policy_family"),
             archetype_id=data.get("archetype_id"),
             strategy_vector=data.get("strategy_vector"),
+            role=data.get("role"),
         )
         agent = trainer.agents.get(agent_id)
         return jsonify(
@@ -1599,6 +1806,7 @@ def create_app(trainer: PPOTrainer):
             data.get("policy_family"),
             data.get("archetype_id"),
             data.get("strategy_vector"),
+            role=data.get("role"),
         )
         agent = trainer.get_or_create_agent(data["agent_id"], binding)
         agent.record_episode(data)
@@ -1710,6 +1918,26 @@ def create_app(trainer: PPOTrainer):
     def evaluation_history():
         limit = max(1, min(200, int(request.args.get("limit", "50"))))
         return jsonify(trainer.get_evaluation_history(request.args.get("family_id"), limit))
+
+    @app.route("/agent/<agent_id>/reward-weights", methods=["GET"])
+    def get_reward_weights(agent_id):
+        return jsonify({"agent_id": agent_id, "reward_weights": trainer.get_reward_weights(agent_id)})
+
+    @app.route("/agent/<agent_id>/reward-weights", methods=["POST"])
+    def set_reward_weights(agent_id):
+        body = request.get_json(silent=True) or {}
+        weights = body.get("reward_weights") if isinstance(body.get("reward_weights"), dict) else body
+        trainer.set_reward_weights(agent_id, weights or {})
+        return jsonify({"ok": True, "reward_weights": trainer.get_reward_weights(agent_id)})
+
+    @app.route("/pbt/step", methods=["POST"])
+    def pbt_step():
+        body = request.get_json(silent=True) or {}
+        result = trainer.pbt_step(
+            fraction=float(body.get("fraction", 0.25)),
+            mutation_strength=float(body.get("mutation_strength", 0.2)),
+        )
+        return jsonify(result), (200 if result.get("ok") else 409)
 
     @app.route("/promotion/candidate/<family_id>", methods=["POST"])
     def candidate_promotion(family_id):

@@ -23,6 +23,7 @@ class AgentBrain {
     this.modelVersionHint = options.modelVersion ?? null;
     this.policyFamily = options.policyFamily || "arena-main";
     this.archetypeId = options.archetypeId || "tactician";
+    this.role = options.role || "league_exploiter";
     this.rewardConfig = options.rewardConfig || {};
     this.reporter = options.reporter || null;
     this.strategyProvider = options.strategyProvider || null;
@@ -42,7 +43,27 @@ class AgentBrain {
     this.nextLoadAttemptAt = 0;
   }
 
+  async _fetchRewardWeights() {
+    try {
+      const res = await fetch(`${this.trainerUrl}/agent/${this.agentId}/reward-weights`);
+      if (!res.ok) return;
+      const body = await res.json();
+      const weights = body?.reward_weights;
+      if (weights && typeof weights === "object") {
+        // Merge: trainer-supplied per-agent weights override the bot's defaults,
+        // but anything missing falls back to the local config so we never get
+        // unknown undefined fields after a partial update.
+        this.rewardConfig = { ...this.rewardConfig, ...weights };
+      }
+    } catch (err) {
+      logger.debug(`Agent ${this.agentId}: reward-weights fetch failed: ${err.message}`);
+    }
+  }
+
   async init() {
+    // Fetch agent-specific reward weights first so any subsequent recordStep
+    // calls use the per-agent genome instead of the global defaults.
+    await this._fetchRewardWeights();
     try {
       this.ort = require("onnxruntime-node");
     } catch {
@@ -160,6 +181,7 @@ class AgentBrain {
           model_version: this.modelVersionHint,
           policy_family: this.policyFamily,
           archetype_id: this.archetypeId,
+          role: this.role,
           strategy_vector: this._getStrategyVector(),
           transitions: this.experienceBuffer,
         }),
@@ -195,6 +217,7 @@ class AgentBrain {
           model_version: this.modelVersionHint,
           policy_family: this.policyFamily,
           archetype_id: this.archetypeId,
+          role: this.role,
           strategy_vector: this._getStrategyVector(),
           reward_totals: this.episodeRewardTotals,
           ...payload,
