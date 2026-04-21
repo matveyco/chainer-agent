@@ -47,7 +47,8 @@ GAE_LAMBDA = 0.95
 CLIP_EPSILON = 0.2
 ENTROPY_COEF = 0.01
 VALUE_COEF = 0.5
-PPO_EPOCHS = 4
+PPO_EPOCHS = 2  # was 4 — lowered to reduce cross-epoch inplace gradient races
+                # that occasionally crash the gunicorn worker with SIGABRT.
 MODEL_SCHEMA_VERSION = 3
 LOG_STD_MIN = -5.0
 LOG_STD_MAX = 2.0
@@ -853,7 +854,10 @@ class PPOTrainer:
                     if not torch.isfinite(loss):
                         raise RuntimeError("non-finite PPO loss")
 
-                    family.optimizer.zero_grad()
+                    # set_to_none=True releases the previous epoch's grad
+                    # buffers fully; safer for cross-epoch graph isolation than
+                    # the default zero-fill, which leaves the buffers around.
+                    family.optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     for parameter in family.model.parameters():
                         if parameter.grad is not None:
