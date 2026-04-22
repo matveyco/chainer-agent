@@ -6,8 +6,8 @@
 
 const logger = require("../utils/logger");
 
-// State dimensions must match Python trainer.
-const STATE_DIM = 24;
+// State dimensions must match Python trainer (24 base features + 8 obstacle raycasts).
+const STATE_DIM = 32;
 const ACTION_DIM = 6;
 
 class AgentBrain {

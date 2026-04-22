@@ -102,6 +102,7 @@ class SmartBot {
     this._tickCounter = 0;
     this._stateUpdatesSeen = 0;
     this._inputsSent = 0;
+    this._lastObstacleRays = null;
   }
 
   async initBrain(trainerUrl) {
@@ -171,9 +172,14 @@ class SmartBot {
         this.data
       );
 
+      // Snapshot the 8 obstacle raycasts (state vector indices 24..31) so the
+      // tactical controller can route around walls. Slice copies the values —
+      // the underlying buffer gets reused on the next extract().
+      this._lastObstacleRays = Array.from(stateVector.slice(24, 32));
+
       this.decisionInFlight = true;
       this.brain.decide(stateVector)
-        .then((decision) => this._applyDecision(decision))
+        .then(() => this._applyDecision())
         .catch(() => {})
         .finally(() => {
           this.decisionInFlight = false;
@@ -220,34 +226,16 @@ class SmartBot {
     this.inputIndex = (this.inputIndex + 1) % INPUT_BUFFER_SIZE;
   }
 
-  _applyDecision(decision) {
-    if (!decision || this.matchEnded) return;
+  _applyDecision() {
+    if (this.matchEnded) return;
     this.decisionsMade += 1;
 
-    if (this.strategicBrain) {
-      const crystalCtx = this.closestCrystal
-        ? (() => {
-            const dx = this.closestCrystal.x - this.positionArray[0];
-            const dz = this.closestCrystal.z - this.positionArray[2];
-            const len = Math.sqrt(dx * dx + dz * dz) || 1;
-            return { dirX: dx / len, dirZ: dz / len };
-          })()
-        : null;
-
-      decision = this.strategicBrain.modifyAction(decision, {
-        hasEnemy: !!this.closestEnemy,
-        enemyDistance: this.closestEnemy?.distance || 999,
-        healthPercent: (this.data?.health || 100) / 100,
-        score: this.data?.score || 0,
-        kills: this.data?.kills || 0,
-        deaths: this.data?.deaths || 0,
-        posX: this.positionArray[0] / 60,
-        posZ: this.positionArray[2] / 60,
-        closestCrystal: crystalCtx,
-      });
-    }
-
-    const tactical = this.tacticalController.stabilize(decision, {
+    // Tactical controller is now the primary decision maker. The neural net's
+    // action is still recorded by AgentBrain for gradient updates (advisory),
+    // but doesn't drive in-game behavior — the scripted policy + obstacle
+    // raycasts produce a usable bot today, while PPO + PBT keep evolving the
+    // value function on top of the same per-agent strategy params.
+    const tactical = this.tacticalController.decide({
       enemy: this.closestEnemy ? this._getEnemyContext() : null,
       crystal: this.closestCrystal ? this._getCrystalContext() : null,
       strategy: this.strategicBrain?.getStrategyVector?.() || null,
@@ -255,16 +243,14 @@ class SmartBot {
       weaponRange: this.data?.weaponTargetDistance || 20,
       cooldownReady: this.coolDownTimer <= 0,
       abilityReady: this._hasReadyAbility(),
-      passiveMs: Date.now() - Math.max(this.lastCombatAt || 0, this.lastShotAt || 0),
       position: this.positionVector,
       distanceFromCenter: getArrayLength(this.positionArray),
+      obstacleRays: this._lastObstacleRays,
     });
-    decision = tactical.action;
-    if (tactical.overridden) {
-      this.tacticalOverrides += 1;
-      this.tacticalReasons = tactical.reasons;
-      this.reporter?.incrementCounter("tacticalOverrides");
-    }
+    const decision = tactical.action;
+    this.tacticalOverrides += 1;
+    this.tacticalReasons = tactical.reasons;
+    this.reporter?.incrementCounter("tacticalOverrides");
 
     const input = this.inputBuffer[this.inputIndex];
     if (!input) return;

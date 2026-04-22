@@ -66,7 +66,16 @@ PROMOTION_MARGIN = 0.05
 PROMOTION_MIN_WIN_RATE = 0.55
 TRAIN_STALL_SECONDS = 300
 EXPORT_STALL_SECONDS = 300
-DEVICE = torch.device("cpu")
+# Pick CUDA when available so the GB10 GPU does the PPO heavy lifting; fall
+# back to CPU for laptops + CI. Override with TRAINER_DEVICE=cpu if a GPU run
+# misbehaves and we need a quick rollback without redeploying code.
+_DEVICE_OVERRIDE = os.environ.get("TRAINER_DEVICE", "").strip().lower()
+if _DEVICE_OVERRIDE:
+    DEVICE = torch.device(_DEVICE_OVERRIDE)
+elif torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+else:
+    DEVICE = torch.device("cpu")
 
 # PBT (Population-Based Training) — genetic algorithm operating on per-agent
 # reward weights. Each agent owns a copy of REWARD_WEIGHT_DEFAULTS that PBT
@@ -405,7 +414,7 @@ class AgentRecord:
 class PolicyFamily:
     def __init__(self, family_id: str):
         self.family_id = family_id
-        self.model = ConditionedActorCritic()
+        self.model = ConditionedActorCritic().to(DEVICE)
         self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE)
         # Per-family training lock. Without this, gunicorn --threads 8 lets
         # multiple HTTP requests run process_experience -> _train_family on
@@ -441,6 +450,9 @@ class PolicyFamily:
             changed = True
         if changed:
             self.model.resize_embeddings(len(self.agent_slots), len(self.archetype_slots))
+            # _resize_embedding builds a fresh nn.Embedding on CPU; re-pin the
+            # whole model to DEVICE so the new params don't get left behind.
+            self.model.to(DEVICE)
             self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE)
         return self.agent_slots[agent_id], self.archetype_slots[archetype_id]
 
@@ -521,7 +533,7 @@ class PPOTrainer:
 
         self.export_thread = threading.Thread(target=self._export_worker, daemon=True)
         self.export_thread.start()
-        print(f"[Trainer] Device: {DEVICE} (shared conditioned CPU training)")
+        print(f"[Trainer] Device: {DEVICE} (cuda available: {torch.cuda.is_available()})")
 
     def _load_family_checkpoint_payload(self, checkpoint_path: Path) -> dict:
         ckpt = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
@@ -545,6 +557,7 @@ class PPOTrainer:
             max(len(ckpt.get("archetype_slots", {})), 1),
         )
         family.model.load_state_dict(ckpt["model_state"])
+        family.model.to(DEVICE)
         family.optimizer = optim.Adam(family.model.parameters(), lr=LEARNING_RATE)
         optimizer_state = ckpt.get("optimizer_state")
         if optimizer_state:
@@ -773,11 +786,11 @@ class PPOTrainer:
             reward = max(-20.0, min(20.0, reward))
             done = 1.0 if transition.get("done") else 0.0
 
-            state_t = torch.FloatTensor(state).unsqueeze(0)
-            action_t = torch.FloatTensor(action).unsqueeze(0)
-            agent_t = torch.LongTensor([agent_index])
-            archetype_t = torch.LongTensor([archetype_index])
-            strategy_t = torch.FloatTensor([strategy_values])
+            state_t = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
+            action_t = torch.FloatTensor(action).unsqueeze(0).to(DEVICE)
+            agent_t = torch.LongTensor([agent_index]).to(DEVICE)
+            archetype_t = torch.LongTensor([archetype_index]).to(DEVICE)
+            strategy_t = torch.FloatTensor([strategy_values]).to(DEVICE)
             with torch.no_grad():
                 action_mean, log_std, value = family.model(state_t, agent_t, archetype_t, strategy_t)
                 if not torch.isfinite(action_mean).all() or not torch.isfinite(log_std).all() or not torch.isfinite(value).all():
@@ -832,12 +845,12 @@ class PPOTrainer:
         snapshot = copy.deepcopy(family.model.state_dict())
 
         try:
-            states = _sanitize_tensor(torch.FloatTensor(np.array(family.states)), clamp_min=-INPUT_CLAMP, clamp_max=INPUT_CLAMP)
-            actions = _sanitize_tensor(torch.FloatTensor(np.array(family.actions)), clamp_min=-ACTION_CLAMP, clamp_max=ACTION_CLAMP)
-            agent_indices = torch.LongTensor(np.array(family.agent_indices))
-            archetype_indices = torch.LongTensor(np.array(family.archetype_indices))
-            strategies = _sanitize_tensor(torch.FloatTensor(np.array(family.strategy_vectors)), clamp_min=0.0, clamp_max=1.0)
-            old_log_probs = _sanitize_tensor(torch.FloatTensor(family.log_probs), clamp_min=-100.0, clamp_max=100.0)
+            states = _sanitize_tensor(torch.FloatTensor(np.array(family.states)), clamp_min=-INPUT_CLAMP, clamp_max=INPUT_CLAMP).to(DEVICE)
+            actions = _sanitize_tensor(torch.FloatTensor(np.array(family.actions)), clamp_min=-ACTION_CLAMP, clamp_max=ACTION_CLAMP).to(DEVICE)
+            agent_indices = torch.LongTensor(np.array(family.agent_indices)).to(DEVICE)
+            archetype_indices = torch.LongTensor(np.array(family.archetype_indices)).to(DEVICE)
+            strategies = _sanitize_tensor(torch.FloatTensor(np.array(family.strategy_vectors)), clamp_min=0.0, clamp_max=1.0).to(DEVICE)
+            old_log_probs = _sanitize_tensor(torch.FloatTensor(family.log_probs), clamp_min=-100.0, clamp_max=100.0).to(DEVICE)
             rewards = [max(-20.0, min(20.0, float(reward) if math.isfinite(reward) else 0.0)) for reward in family.rewards]
             values = [float(value) if math.isfinite(value) else 0.0 for value in family.values]
             dones = [1.0 if done else 0.0 for done in family.dones]
@@ -852,8 +865,8 @@ class PPOTrainer:
                     gae = 0.0
                 advantages[idx] = gae
 
-            advantages_t = _sanitize_tensor(torch.FloatTensor(advantages), clamp_min=-100.0, clamp_max=100.0)
-            returns = _sanitize_tensor(advantages_t + torch.FloatTensor(values), clamp_min=-100.0, clamp_max=100.0)
+            advantages_t = _sanitize_tensor(torch.FloatTensor(advantages), clamp_min=-100.0, clamp_max=100.0).to(DEVICE)
+            returns = _sanitize_tensor(advantages_t + torch.FloatTensor(values).to(DEVICE), clamp_min=-100.0, clamp_max=100.0)
             advantages_t = (advantages_t - advantages_t.mean()) / (advantages_t.std() + 1e-8)
             advantages_t = _sanitize_tensor(advantages_t, clamp_min=-20.0, clamp_max=20.0)
 

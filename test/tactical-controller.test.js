@@ -3,58 +3,142 @@ const assert = require("node:assert/strict");
 
 const { TacticalController } = require("../src/bot/TacticalController");
 
-test("tactical controller forces engagement when a nearby enemy meets a passive policy", () => {
+test("tactical controller engages and shoots a nearby aggressive enemy", () => {
   const controller = new TacticalController({ archetypeId: "berserker", seed: 4 });
-  const result = controller.stabilize(
-    {
-      moveX: 0,
-      moveZ: 0,
-      aimOffsetX: 2,
-      aimOffsetZ: -2,
-      shouldShoot: false,
-      shouldUseAbility: false,
-    },
-    {
-      enemy: { distance: 8, dirX: 1, dirZ: 0 },
-      strategy: { aggression: 0.9, accuracy_focus: 0.2, ability_usage: 0.9, retreat_threshold: 0.05 },
-      healthPercent: 0.9,
-      weaponRange: 20,
-      cooldownReady: true,
-      abilityReady: true,
-      passiveMs: 9000,
-      position: { x: 0, z: 0 },
-      distanceFromCenter: 0,
-    }
-  );
+  const result = controller.decide({
+    enemy: { distance: 8, dirX: 1, dirZ: 0 },
+    strategy: { aggression: 0.9, accuracy_focus: 0.2, ability_usage: 0.9, retreat_threshold: 0.05 },
+    healthPercent: 0.9,
+    weaponRange: 20,
+    cooldownReady: true,
+    abilityReady: true,
+    position: { x: 0, z: 0 },
+    distanceFromCenter: 0,
+  });
 
   assert.equal(result.overridden, true);
   assert.equal(result.action.shouldShoot, true);
   assert.equal(Math.hypot(result.action.moveX, result.action.moveZ) > 0.5, true);
   assert.equal(result.reasons.includes("shoot_enemy"), true);
+  assert.equal(result.reasons.includes("engage_enemy"), true);
 });
 
-test("tactical controller routes passive bots toward crystals when combat is absent", () => {
+test("tactical controller routes toward crystals when combat is absent", () => {
   const controller = new TacticalController({ archetypeId: "collector", seed: 2 });
-  const result = controller.stabilize(
-    {
-      moveX: 0,
-      moveZ: 0,
-      aimOffsetX: 0,
-      aimOffsetZ: 0,
-      shouldShoot: false,
-      shouldUseAbility: false,
-    },
-    {
-      crystal: { dirX: 0.6, dirZ: -0.8, distance: 6 },
-      strategy: { crystal_priority: 0.95 },
-      passiveMs: 8000,
-      position: { x: 4, z: -3 },
-      distanceFromCenter: 5,
-    }
-  );
+  const result = controller.decide({
+    crystal: { dirX: 0.6, dirZ: -0.8, distance: 6 },
+    strategy: { crystal_priority: 0.95 },
+    position: { x: 4, z: -3 },
+    distanceFromCenter: 5,
+  });
 
   assert.equal(result.overridden, true);
   assert.equal(result.reasons.includes("seek_crystal"), true);
   assert.equal(result.action.moveX > 0, true);
   assert.equal(result.action.moveZ < 0, true);
+});
+
+test("tactical controller retreats and refuses to shoot at low health", () => {
+  const controller = new TacticalController({ archetypeId: "guardian", seed: 1 });
+  const result = controller.decide({
+    enemy: { distance: 6, dirX: 1, dirZ: 0 },
+    strategy: { aggression: 0.6, retreat_threshold: 0.4, ability_usage: 0.5 },
+    healthPercent: 0.2, // well below retreat_threshold
+    weaponRange: 20,
+    cooldownReady: true,
+    abilityReady: true,
+    position: { x: 0, z: 0 },
+    distanceFromCenter: 0,
+  });
+
+  assert.equal(result.reasons.includes("retreat_enemy"), true);
+  assert.equal(result.action.shouldShoot, false);
+  // Retreat = move opposite the enemy direction, so moveX should be negative.
+  assert.ok(result.action.moveX < 0, `expected retreat west, got moveX=${result.action.moveX}`);
+});
+
+test("tactical controller closes the gap when the enemy is out of range", () => {
+  const controller = new TacticalController({ archetypeId: "hunter", seed: 0 });
+  const result = controller.decide({
+    enemy: { distance: 40, dirX: 1, dirZ: 0 }, // way past engageRange of 23
+    strategy: { aggression: 0.6 },
+    healthPercent: 1,
+    weaponRange: 20,
+    cooldownReady: true,
+    position: { x: 0, z: 0 },
+    distanceFromCenter: 0,
+  });
+
+  assert.equal(result.reasons.includes("close_gap"), true);
+  assert.equal(result.action.shouldShoot, false); // distance > engageRange*1.05
+  assert.ok(result.action.moveX > 0.5, "should move east toward enemy");
+});
+
+test("tactical controller returns to center when out of bounds", () => {
+  const controller = new TacticalController({ archetypeId: "tactician", seed: 3, safeSize: 50 });
+  const result = controller.decide({
+    position: { x: 60, z: 0 }, // > 50 * 0.92 = 46
+    distanceFromCenter: 60,
+  });
+
+  assert.equal(result.reasons.includes("return_to_center"), true);
+  assert.ok(result.action.moveX < 0, "should head back west toward (0, 0)");
+});
+
+test("obstacle avoidance leaves clear directions untouched", () => {
+  const controller = new TacticalController({ seed: 0 });
+  // All rays clear (1.0).
+  const rays = [1, 1, 1, 1, 1, 1, 1, 1];
+  const result = controller._avoidObstacles(1, 0, rays);
+  assert.equal(result.adjusted, false);
+  assert.ok(Math.abs(result.x - 1) < 1e-6);
+  assert.ok(Math.abs(result.z) < 1e-6);
+});
+
+test("obstacle avoidance reroutes when forward is blocked", () => {
+  const controller = new TacticalController({ seed: 0 });
+  // Wall straight east (ray 0 = blocked), everything else clear.
+  const rays = [0.05, 1, 1, 1, 1, 1, 1, 1];
+  const result = controller._avoidObstacles(1, 0, rays);
+  assert.equal(result.adjusted, true);
+  // Should pick a flanking clear direction (NE or SE), not push into the wall.
+  assert.ok(Math.abs(result.x) < 0.99 || result.x < 0, "should not still go due east");
+});
+
+test("decide() picks a clear path when its first choice would walk into a wall", () => {
+  const controller = new TacticalController({ archetypeId: "hunter", seed: 0 });
+  // Enemy is far east → close_gap mode (mostly straight-east desired vector).
+  // Ray 0 (E) and ray 1 (NE) blocked; ray 7 (SE) and ray 6 (S) are clear.
+  const rays = [0.02, 0.05, 1, 1, 1, 1, 1, 1];
+  const result = controller.decide({
+    enemy: { distance: 40, dirX: 1, dirZ: 0 },
+    strategy: { aggression: 0.7 },
+    healthPercent: 1,
+    weaponRange: 20,
+    cooldownReady: true,
+    position: { x: 0, z: 0 },
+    distanceFromCenter: 0,
+    obstacleRays: rays,
+  });
+
+  assert.equal(result.reasons.includes("avoid_obstacle"), true);
+  // It should pick SE (ray 7: x≈0.707, z≈-0.707) as the closest clear flank.
+  assert.ok(result.action.moveZ < -0.4, `expected reroute south, got moveZ=${result.action.moveZ}`);
+});
+
+test("stabilize() is a backwards-compatible alias for decide()", () => {
+  const controller = new TacticalController({ archetypeId: "hunter", seed: 0 });
+  const ctx = {
+    enemy: { distance: 10, dirX: 1, dirZ: 0 },
+    strategy: { aggression: 0.7 },
+    healthPercent: 1,
+    weaponRange: 20,
+    cooldownReady: true,
+    position: { x: 0, z: 0 },
+    distanceFromCenter: 0,
+  };
+  const direct = controller.decide(ctx);
+  const wrapped = controller.stabilize({ moveX: 0, moveZ: 0 }, ctx);
+  assert.deepEqual(wrapped.action, direct.action);
+  assert.deepEqual(wrapped.reasons, direct.reasons);
 });
