@@ -476,9 +476,21 @@ class RoomCoordinator {
       try {
         const obstacles = this._collectObstaclesFromRoomState(primary.room.state);
         primary.bot.gameState.setStaticObstacles(obstacles);
+        // Diagnostic: log the keys + sizes of every collection on room.state
+        // so we can find where the static map geometry actually lives.
+        // Once the source field is identified this block can be removed.
+        const schemaKeys = {};
+        try {
+          for (const key of Object.keys(primary.room.state || {})) {
+            const value = primary.room.state[key];
+            if (value && typeof value.size === "number") schemaKeys[key] = value.size;
+            else if (value && typeof value.length === "number") schemaKeys[key] = value.length;
+          }
+        } catch {}
         this.runtimeState.recordEvent("info", "obstacles loaded", {
           roomIndex: this.roomIndex,
           count: obstacles.length,
+          stateCollections: schemaKeys,
         });
       } catch (err) {
         this.runtimeState.recordEvent("warn", "obstacles snapshot failed", {
