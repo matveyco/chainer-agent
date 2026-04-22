@@ -100,6 +100,12 @@ REWARD_WEIGHT_BOUNDS = {
 }
 PBT_LOG = LOGS_DIR / "pbt.jsonl"
 
+# Retention: keep at most this many recent versions per family/agent on disk.
+# Aliased versions (champion/candidate/challenger/latest) are ALWAYS preserved
+# regardless of how old they are. Without this the registry grows ~1 dir per
+# train step (1M+ over a week), and the host's disk fills up.
+KEEP_RECENT_VERSIONS = int(os.environ.get("KEEP_RECENT_VERSIONS", "200"))
+
 ARCHETYPE_DEFAULTS = {
     "hunter": {"aggression": 0.9, "accuracy_focus": 0.4, "crystal_priority": 0.1, "ability_usage": 0.7, "retreat_threshold": 0.1},
     "sniper": {"aggression": 0.2, "accuracy_focus": 0.95, "crystal_priority": 0.2, "ability_usage": 0.3, "retreat_threshold": 0.4},
@@ -944,6 +950,62 @@ class PPOTrainer:
             },
             self._family_checkpoint_path(family_id, family.model_version),
         )
+        # Run cheap retention check ~once per 25 saves so we don't
+        # walk the version dir on every train step.
+        if family.model_version % 25 == 0:
+            self._prune_old_versions(family_id)
+
+    def _prune_old_versions(self, family_id: str):
+        """Delete old version dirs that are neither aliased nor in the
+        most recent KEEP_RECENT_VERSIONS slice. Runs for the family AND
+        for every bound agent. Failures are non-fatal — we never stop
+        the training step on a cleanup error."""
+        try:
+            family = self.families[family_id]
+            family_aliases = self._read_family_aliases(family_id)
+            self._prune_versions_dir(
+                self._family_versions_root(family_id),
+                {int(v) for v in family_aliases.values() if v},
+            )
+            for agent_id in family.bound_agents:
+                aliases = self._read_agent_aliases(agent_id)
+                self._prune_versions_dir(
+                    self._agent_versions_root(agent_id),
+                    {int(v) for v in aliases.values() if v},
+                )
+        except Exception as exc:
+            print(f"[Trainer] prune failed for {family_id}: {exc}")
+
+    def _prune_versions_dir(self, versions_root: Path, aliased: set[int]):
+        if not versions_root.exists():
+            return
+        version_dirs = []
+        for child in versions_root.iterdir():
+            if not child.is_dir() or not child.name.startswith("v"):
+                continue
+            try:
+                version_dirs.append((int(child.name[1:]), child))
+            except ValueError:
+                continue
+        if len(version_dirs) <= KEEP_RECENT_VERSIONS:
+            return
+        version_dirs.sort(key=lambda pair: pair[0])
+        keep_recent = {ver for ver, _ in version_dirs[-KEEP_RECENT_VERSIONS:]}
+        keep = aliased | keep_recent
+        import shutil
+        for ver, path in version_dirs:
+            if ver in keep:
+                continue
+            try:
+                shutil.rmtree(path)
+            except Exception:
+                pass
+
+    def _family_versions_root(self, family_id: str) -> Path:
+        return POLICIES_DIR / family_id / "versions"
+
+    def _agent_versions_root(self, agent_id: str) -> Path:
+        return AGENTS_DIR / agent_id / "versions"
 
     def _write_family_metadata(self, family_id: str, version: int, extra: dict | None = None):
         family = self.families[family_id]
