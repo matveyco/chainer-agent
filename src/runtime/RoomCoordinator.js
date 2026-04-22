@@ -468,7 +468,79 @@ class RoomCoordinator {
       }
     }
 
+    // Snapshot static obstacles from the room's Colyseus state once after
+    // join so bots can perceive walls / crates / barrels via raycasts.
+    // The shared GameState is reused across all sessions in this room.
+    const primary = connectedSessions[0];
+    if (primary?.room?.state) {
+      try {
+        const obstacles = this._collectObstaclesFromRoomState(primary.room.state);
+        primary.bot.gameState.setStaticObstacles(obstacles);
+        this.runtimeState.recordEvent("info", "obstacles loaded", {
+          roomIndex: this.roomIndex,
+          count: obstacles.length,
+        });
+      } catch (err) {
+        this.runtimeState.recordEvent("warn", "obstacles snapshot failed", {
+          roomIndex: this.roomIndex,
+          error: err.message,
+        });
+      }
+    }
+
     return connectedSessions;
+  }
+
+  /**
+   * Pull static obstacle geometry out of the Colyseus room state. The
+   * server exposes dynamicColliders, acidBarrels, and (sometimes)
+   * breakables — we read whatever is present and normalise to
+   * {x, y, z, radius, kind, id}. Defensive: every field access is guarded
+   * because the underlying Colyseus schema can be undefined or empty.
+   */
+  _collectObstaclesFromRoomState(state) {
+    const out = [];
+    const harvest = (collection, kind) => {
+      if (!collection) return;
+      const iter = typeof collection.forEach === "function" ? collection : null;
+      if (iter) {
+        iter.forEach((entry, key) => out.push(this._normalizeObstacle(entry, kind, key)));
+      } else if (typeof collection[Symbol.iterator] === "function") {
+        for (const entry of collection) out.push(this._normalizeObstacle(entry, kind, null));
+      }
+    };
+    harvest(state.dynamicColliders, "dynamicCollider");
+    harvest(state.acidBarrels, "acidBarrel");
+    harvest(state.breakables, "breakable");
+    return out.filter(Boolean);
+  }
+
+  _normalizeObstacle(entry, kind, key) {
+    if (!entry) return null;
+    // Position can live as x/y/z fields or position[3] depending on the
+    // Colyseus schema generation.
+    const x = Number(entry.x ?? entry.position?.[0] ?? entry.sx);
+    const y = Number(entry.y ?? entry.position?.[1] ?? entry.sy ?? 0);
+    const z = Number(entry.z ?? entry.position?.[2] ?? entry.sz);
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+    let radius = Number(entry.radius);
+    if (!Number.isFinite(radius)) {
+      const sx = Number(entry.scaleX ?? entry.scale?.[0]);
+      const sz = Number(entry.scaleZ ?? entry.scale?.[2]);
+      if (Number.isFinite(sx) && Number.isFinite(sz)) {
+        radius = Math.max(Math.abs(sx), Math.abs(sz)) / 2;
+      } else {
+        radius = kind === "acidBarrel" ? 1.0 : 1.5; // crates ~3m wide, barrels ~2m
+      }
+    }
+    return {
+      x,
+      y,
+      z,
+      radius: Math.max(0.3, radius),
+      kind,
+      id: entry.id || entry.dynamicColliderID || entry.acidBarrelID || entry.breakableID || key || null,
+    };
   }
 
   _setupBotHandlers(session, isPrimary, onDispose) {
@@ -581,7 +653,15 @@ class RoomCoordinator {
     room.onMessage("room:player:loaded", noop);
     room.onMessage("room:player:rejoined", noop);
     room.onMessage("room:leaderboard:update", noop);
-    room.onMessage("room:breakable:destroy", noop);
+    // Remove the destroyed obstacle from the bot's static map so the
+    // raycast features stop reporting it as blocking. Only the primary
+    // session owns the shared GameState.
+    room.onMessage("room:breakable:destroy", isPrimary
+      ? safe((data) => {
+          const id = data?.breakableID || data?.id;
+          if (id) bot.gameState.removeStaticObstacle(id);
+        }, "breakable_destroy")
+      : noop);
     room.onMessage("room:invite:userID", noop);
     room.onMessage("player:consecutive-kills", noop);
     room.onMessage("player:first-kill", noop);

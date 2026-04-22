@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-STATE_DIM = 24
+STATE_DIM = 32  # 24 base + 8 obstacle raycast features
 ACTION_DIM = 6
 STRATEGY_KEYS = [
     "aggression",
@@ -51,7 +51,7 @@ PPO_EPOCHS = 1  # Single-epoch PPO. Multi-epoch causes a cross-epoch in-place
                 # gradient race that crashes the gunicorn worker with SIGABRT/
                 # SIGSEGV every few hundred training steps. Sample efficiency
                 # drops slightly but trainer uptime jumps to indefinite.
-MODEL_SCHEMA_VERSION = 3
+MODEL_SCHEMA_VERSION = 4  # bumped from 3 when STATE_DIM grew 24 -> 32 (obstacle raycasts)
 LOG_STD_MIN = -5.0
 LOG_STD_MAX = 2.0
 INPUT_CLAMP = 8.0
@@ -527,6 +527,16 @@ class PPOTrainer:
         ckpt = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
         if ckpt.get("schema_version") not in (MODEL_SCHEMA_VERSION, None):
             raise RuntimeError("checkpoint schema mismatch")
+        # Refuse checkpoints whose input dim disagrees with the current
+        # STATE_DIM. After bumping STATE_DIM (e.g. adding obstacle raycasts)
+        # the old weights' first linear layer is the wrong shape — better to
+        # refuse the load and let the trainer start a fresh family than
+        # silently crash on the first forward pass.
+        ckpt_state_dim = int(ckpt.get("state_dim") or 0)
+        if ckpt_state_dim and ckpt_state_dim != STATE_DIM:
+            raise RuntimeError(
+                f"checkpoint state_dim mismatch: expected {STATE_DIM}, found {ckpt_state_dim}"
+            )
         return ckpt
 
     def _hydrate_family_from_checkpoint(self, family: PolicyFamily, ckpt: dict):

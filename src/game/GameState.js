@@ -6,6 +6,13 @@
 const { SpatialGrid } = require("./SpatialGrid");
 const { GameStateDeserializer } = require("./Deserializer");
 
+/**
+ * Snapshot of static obstacle geometry the bot uses for collision-aware
+ * navigation. Each entry is approximated as a sphere on the XZ plane:
+ *   { x, y, z, radius }
+ * Sourced from room.state.dynamicColliders + acidBarrels + breakables and
+ * trimmed when room:breakable:destroy fires.
+ */
 class GameState {
   constructor() {
     this.spatialGrid = new SpatialGrid();
@@ -13,6 +20,7 @@ class GameState {
     this.playerHealth = new Map(); // userID -> health
     this.playerData = new Map(); // userID -> full player state from room.state
     this.battleCrystals = [];
+    this.staticObstacles = []; // [{x, y, z, radius, kind, id}]
   }
 
   /**
@@ -162,11 +170,103 @@ class GameState {
     return alive;
   }
 
+  /**
+   * Replace the static obstacle list with a fresh snapshot. Each entry
+   * may carry { x, y, z, radius, kind, id }; we accept either `radius`
+   * directly or {scale: [sx, sy, sz]} from the protobuf shape.
+   */
+  setStaticObstacles(list) {
+    if (!Array.isArray(list)) {
+      this.staticObstacles = [];
+      return;
+    }
+    this.staticObstacles = list
+      .map((raw) => {
+        const x = Number(raw?.x ?? raw?.position?.[0]);
+        const y = Number(raw?.y ?? raw?.position?.[1]);
+        const z = Number(raw?.z ?? raw?.position?.[2]);
+        if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+        let radius = Number(raw?.radius);
+        if (!Number.isFinite(radius)) {
+          const scale = raw?.scale;
+          if (Array.isArray(scale) && scale.length >= 3) {
+            // scale is full extents; radius ~= max(half-extent on XZ).
+            radius = Math.max(Math.abs(Number(scale[0]) || 0), Math.abs(Number(scale[2]) || 0)) / 2;
+          } else {
+            radius = 1.0; // safe default for an unknown collider
+          }
+        }
+        return {
+          x,
+          y: Number.isFinite(y) ? y : 0,
+          z,
+          radius: Math.max(0.2, radius),
+          kind: raw?.kind || raw?.type || "obstacle",
+          id: raw?.id || null,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  removeStaticObstacle(idOrPredicate) {
+    if (!this.staticObstacles.length) return;
+    if (typeof idOrPredicate === "function") {
+      this.staticObstacles = this.staticObstacles.filter((o) => !idOrPredicate(o));
+    } else {
+      this.staticObstacles = this.staticObstacles.filter((o) => o.id !== idOrPredicate);
+    }
+  }
+
+  getStaticObstacleCount() {
+    return this.staticObstacles.length;
+  }
+
+  /**
+   * Cast a ray on the XZ plane from `origin` in `direction` (auto-normalised)
+   * and return distance to the nearest static obstacle within `maxDistance`,
+   * or `maxDistance` if nothing is hit.
+   *
+   * Treats each obstacle as a vertical cylinder of radius `obstacle.radius`,
+   * which is a reasonable approximation for crates / barrels / fences in a
+   * top-down arena.
+   */
+  rayDistanceToObstacle(origin, direction, maxDistance) {
+    if (!origin || !direction || !this.staticObstacles.length) return maxDistance;
+    const dx = Number(direction.x ?? direction[0]) || 0;
+    const dz = Number(direction.z ?? direction[2]) || 0;
+    const length = Math.sqrt(dx * dx + dz * dz);
+    if (length === 0) return maxDistance;
+    const ux = dx / length;
+    const uz = dz / length;
+
+    let best = maxDistance;
+    for (const obs of this.staticObstacles) {
+      // Vector from origin to obstacle center on XZ plane.
+      const ox = obs.x - origin.x;
+      const oz = obs.z - origin.z;
+      // Project onto ray direction; if behind origin, skip.
+      const t = ox * ux + oz * uz;
+      if (t < 0 || t > best) continue;
+      // Perpendicular distance from obstacle center to the ray.
+      const perpX = ox - t * ux;
+      const perpZ = oz - t * uz;
+      const perpDist = Math.sqrt(perpX * perpX + perpZ * perpZ);
+      if (perpDist <= obs.radius) {
+        // Distance from origin to where ray enters the cylinder.
+        const inside = Math.sqrt(Math.max(0, obs.radius * obs.radius - perpDist * perpDist));
+        const hit = Math.max(0, t - inside);
+        if (hit < best) best = hit;
+      }
+    }
+    return best;
+  }
+
   clear() {
     this.spatialGrid.clear();
     this.playerHealth.clear();
     this.playerData.clear();
     this.battleCrystals = [];
+    this.staticObstacles = [];
   }
 }
 

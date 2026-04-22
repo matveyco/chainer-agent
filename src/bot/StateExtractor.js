@@ -1,7 +1,7 @@
 /**
  * Transforms raw game state into a normalized input vector for the neural network.
  *
- * 24 inputs (must match Python trainer STATE_DIM):
+ * 32 inputs (must match Python trainer STATE_DIM):
  *   0: own health (0-1)
  *   1: own X position (clamped ±1)
  *   2: own Z position (clamped ±1)
@@ -26,15 +26,26 @@
  *  21: ability readiness ratio (0-1)
  *  22: recent damage dealt (0-1)
  *  23: recent damage taken (0-1)
+ *  24-31: 8-direction obstacle raycast distances (0=at obstacle, 1=clear up to RAYCAST_RANGE)
+ *         in world-frame compass order: E, NE, N, NW, W, SW, S, SE
  */
 
 const { clamp, getArrayLength } = require("../utils/math");
 
-const INPUT_COUNT = 24;
+const INPUT_COUNT = 32;
 const ARENA_SIZE = 60;
 const MAX_HEALTH = 100;
 const MAX_SPEED = 7;
 const MAX_DAMAGE_WINDOW = 100;
+const RAYCAST_COUNT = 8;
+const RAYCAST_RANGE = 12; // metres — about 2 character widths past a crate
+// 8 unit vectors evenly spaced on the XZ plane, world-frame so the network
+// learns absolute directions rather than depending on a (non-existent)
+// stable bot facing.
+const RAYCAST_DIRECTIONS = Array.from({ length: RAYCAST_COUNT }, (_, i) => {
+  const angle = (Math.PI * 2 * i) / RAYCAST_COUNT;
+  return { x: Math.cos(angle), z: Math.sin(angle) };
+});
 
 class StateExtractor {
   constructor() {
@@ -174,6 +185,19 @@ class StateExtractor {
     // Recent combat context
     v[22] = clamp(this.recentDamageDealt / MAX_DAMAGE_WINDOW, 0, 1);
     v[23] = clamp(this.recentDamageTaken / MAX_DAMAGE_WINDOW, 0, 1);
+
+    // Obstacle raycasts (24-31). 1.0 means the ray went the full RAYCAST_RANGE
+    // without hitting anything; 0.0 means an obstacle is right next to us in
+    // that direction. If the gameState has no obstacle data (didn't load yet)
+    // every value stays at 1.0 — same as "open arena".
+    if (typeof gameState.rayDistanceToObstacle === "function") {
+      for (let i = 0; i < RAYCAST_COUNT; i += 1) {
+        const distance = gameState.rayDistanceToObstacle(myPos, RAYCAST_DIRECTIONS[i], RAYCAST_RANGE);
+        v[24 + i] = clamp(distance / RAYCAST_RANGE, 0, 1);
+      }
+    } else {
+      for (let i = 0; i < RAYCAST_COUNT; i += 1) v[24 + i] = 1.0;
+    }
 
     return v;
   }
