@@ -32,6 +32,16 @@ test("default league role rotates through the pattern", () => {
   assert.equal(defaultLeagueRole(4), "main");
 });
 
+test("default displayName uses ai_chainer prefix to avoid agent_* collisions", () => {
+  const config = { rooms: { count: 1, agentsPerRoom: 4 } };
+  const roster = buildDefaultRoster(config);
+  const agents = flattenRosterAgents(roster);
+  for (const agent of agents) {
+    assert.match(agent.agentId, /^agent_\d+$/, "internal id stays agent_*");
+    assert.match(agent.displayName, /^ai_chainer_\d+$/, `displayName should be ai_chainer_*, got ${agent.displayName}`);
+  }
+});
+
 test("explicit role on roster entry is preserved", () => {
   const roster = buildDefaultRoster({ rooms: { count: 1, agentsPerRoom: 2 } });
   // Manually inject a role and re-normalize via buildDefaultRoster's downstream path:

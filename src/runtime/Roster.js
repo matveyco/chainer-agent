@@ -27,12 +27,26 @@ function defaultLeagueRole(index) {
   return LEAGUE_DEFAULT_PATTERN[index % LEAGUE_DEFAULT_PATTERN.length];
 }
 
+// Visible name prefix sent in room:player:loaded.profile.userName.
+// Kept distinct from the internal agentId (which keys the model registry)
+// so we don't collide with other bot services using "agent_*" naming.
+const DISPLAY_NAME_PREFIX = process.env.BOT_DISPLAY_NAME_PREFIX || "ai_chainer";
+
+function defaultDisplayName(agentId, index) {
+  // If the agentId looks like our internal "agent_<n>" key, swap the prefix
+  // so the player-facing name is e.g. "ai_chainer_3" instead of "agent_3".
+  const match = String(agentId || "").match(/^agent_(\d+)$/);
+  if (match) return `${DISPLAY_NAME_PREFIX}_${match[1]}`;
+  return agentId || `${DISPLAY_NAME_PREFIX}_${index}`;
+}
+
 function normalizeAgent(agent, index, defaultAlias) {
   const archetype = getArchetypeByIndex(index);
   const role = LEAGUE_ROLES.includes(agent.role) ? agent.role : defaultLeagueRole(index);
+  const agentId = agent.agentId || agent.id || `agent_${index}`;
   return {
-    agentId: agent.agentId || agent.id || `agent_${index}`,
-    displayName: agent.displayName || agent.userName || agent.agentId || `agent_${index}`,
+    agentId,
+    displayName: agent.displayName || agent.userName || defaultDisplayName(agentId, index),
     modelAlias: agent.modelAlias || agent.alias || defaultAlias,
     policyFamily: agent.policyFamily || agent.family || "arena-main",
     archetypeId: agent.archetypeId || archetype.id || DEFAULT_ARCHETYPE_ID,
