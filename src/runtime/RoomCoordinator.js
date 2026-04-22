@@ -512,46 +512,109 @@ class RoomCoordinator {
    */
   _collectObstaclesFromRoomState(state) {
     const out = [];
+    let firstSampleLogged = false;
     const harvest = (collection, kind) => {
       if (!collection) return;
       const iter = typeof collection.forEach === "function" ? collection : null;
+      const push = (entry, key) => {
+        // One-time diagnostic: log the first non-empty entry's shape per
+        // schema collection so we can see exactly which fields the
+        // Colyseus state exposes (position vs x/y/z vs sx/sy/sz, etc.).
+        if (!firstSampleLogged && entry) {
+          firstSampleLogged = true;
+          try {
+            const sample = {};
+            for (const key of Object.keys(entry)) {
+              const value = entry[key];
+              if (value === null || value === undefined) sample[key] = String(value);
+              else if (typeof value === "object") {
+                sample[key] = `object{${Object.keys(value).slice(0, 8).join(",")}}`;
+              } else {
+                sample[key] = `${typeof value}:${value}`;
+              }
+            }
+            this.runtimeState.recordEvent("info", "obstacle entry sample", {
+              roomIndex: this.roomIndex,
+              kind,
+              keys: sample,
+            });
+          } catch {}
+        }
+        const obstacle = this._normalizeObstacle(entry, kind, key);
+        if (obstacle) out.push(obstacle);
+      };
       if (iter) {
-        iter.forEach((entry, key) => out.push(this._normalizeObstacle(entry, kind, key)));
+        iter.forEach((entry, key) => push(entry, key));
       } else if (typeof collection[Symbol.iterator] === "function") {
-        for (const entry of collection) out.push(this._normalizeObstacle(entry, kind, null));
+        for (const entry of collection) push(entry, null);
       }
     };
     harvest(state.dynamicColliders, "dynamicCollider");
     harvest(state.acidBarrels, "acidBarrel");
     harvest(state.breakables, "breakable");
-    return out.filter(Boolean);
+    harvest(state.explosives, "explosive"); // TNT crates — large + dangerous
+    return out;
   }
 
   _normalizeObstacle(entry, kind, key) {
     if (!entry) return null;
-    // Position can live as x/y/z fields or position[3] depending on the
-    // Colyseus schema generation.
-    const x = Number(entry.x ?? entry.position?.[0] ?? entry.sx);
-    const y = Number(entry.y ?? entry.position?.[1] ?? entry.sy ?? 0);
-    const z = Number(entry.z ?? entry.position?.[2] ?? entry.sz);
+    // Position may live as direct x/y/z fields (most likely Colyseus
+    // pattern), as a nested position Schema with .x/.y/.z, as the legacy
+    // sx/sy/sz fields, or as a position array. Try all four shapes.
+    const directX = entry.x;
+    const directZ = entry.z;
+    const posObj = entry.position;
+    const x = Number(
+      directX ?? entry.sx ??
+      (posObj && typeof posObj === "object"
+        ? (posObj.x ?? posObj[0])
+        : undefined)
+    );
+    const y = Number(
+      entry.y ?? entry.sy ??
+      (posObj && typeof posObj === "object"
+        ? (posObj.y ?? posObj[1] ?? 0)
+        : 0)
+    );
+    const z = Number(
+      directZ ?? entry.sz ??
+      (posObj && typeof posObj === "object"
+        ? (posObj.z ?? posObj[2])
+        : undefined)
+    );
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
     let radius = Number(entry.radius);
     if (!Number.isFinite(radius)) {
-      const sx = Number(entry.scaleX ?? entry.scale?.[0]);
-      const sz = Number(entry.scaleZ ?? entry.scale?.[2]);
+      const scaleObj = entry.scale;
+      const sx = Number(
+        entry.scaleX ??
+        (scaleObj && typeof scaleObj === "object"
+          ? (scaleObj.x ?? scaleObj[0])
+          : undefined)
+      );
+      const sz = Number(
+        entry.scaleZ ??
+        (scaleObj && typeof scaleObj === "object"
+          ? (scaleObj.z ?? scaleObj[2])
+          : undefined)
+      );
       if (Number.isFinite(sx) && Number.isFinite(sz)) {
         radius = Math.max(Math.abs(sx), Math.abs(sz)) / 2;
       } else {
-        radius = kind === "acidBarrel" ? 1.0 : 1.5; // crates ~3m wide, barrels ~2m
+        // Sensible defaults per kind when no geometry hints are available.
+        radius = kind === "acidBarrel" ? 1.0
+              : kind === "explosive" ? 1.6
+              : kind === "breakable" ? 1.3
+              : 1.5;
       }
     }
     return {
       x,
-      y,
+      y: Number.isFinite(y) ? y : 0,
       z,
       radius: Math.max(0.3, radius),
       kind,
-      id: entry.id || entry.dynamicColliderID || entry.acidBarrelID || entry.breakableID || key || null,
+      id: entry.id || entry.dynamicColliderID || entry.acidBarrelID || entry.breakableID || entry.explosiveID || key || null,
     };
   }
 
