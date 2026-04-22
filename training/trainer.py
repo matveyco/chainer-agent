@@ -561,7 +561,20 @@ class PPOTrainer:
         family.optimizer = optim.Adam(family.model.parameters(), lr=LEARNING_RATE)
         optimizer_state = ckpt.get("optimizer_state")
         if optimizer_state:
-            family.optimizer.load_state_dict(optimizer_state)
+            try:
+                family.optimizer.load_state_dict(optimizer_state)
+                # Old checkpoints were written on CPU; if we just brought the
+                # model onto CUDA, Adam's momentum buffers (exp_avg etc.) still
+                # live on CPU. Mixing devices makes optimizer.step crash with
+                # cross-backend dispatch errors (saw "VE backend" on GB10).
+                # Pull every state tensor across to DEVICE.
+                for state in family.optimizer.state.values():
+                    for key, value in list(state.items()):
+                        if isinstance(value, torch.Tensor):
+                            state[key] = value.to(DEVICE)
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"[Trainer] Optimizer state load failed for {family.family_id}, starting fresh: {exc}")
+                family.optimizer = optim.Adam(family.model.parameters(), lr=LEARNING_RATE)
         family.model_version = int(ckpt.get("model_version", 0))
         family.train_steps = int(ckpt.get("train_steps", 0))
         family.agent_slots = dict(ckpt.get("agent_slots", {}))
