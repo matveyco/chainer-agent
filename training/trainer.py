@@ -407,6 +407,12 @@ class PolicyFamily:
         self.family_id = family_id
         self.model = ConditionedActorCritic()
         self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE)
+        # Per-family training lock. Without this, gunicorn --threads 8 lets
+        # multiple HTTP requests run process_experience -> _train_family on
+        # the same model concurrently. Adam mutates parameters in place,
+        # the next thread's forward pass still references the old version,
+        # and torch raises "variable modified by inplace operation".
+        self.train_lock = threading.Lock()
         self.model_version = 0
         self.train_steps = 0
         self.last_train_time = 0.0
@@ -801,6 +807,16 @@ class PPOTrainer:
         return accepted
 
     def _train_family(self, family_id: str):
+        family = self.families[family_id]
+        # Serialize training updates per family. Without this, gunicorn's
+        # 8 worker threads can interleave forward/backward/optimizer.step
+        # on the same model and torch raises "variable modified by inplace
+        # operation" because Adam mutates parameters that another thread's
+        # autograd graph still references.
+        with family.train_lock:
+            self._train_family_locked(family_id)
+
+    def _train_family_locked(self, family_id: str):
         family = self.families[family_id]
         t0 = time.time()
         snapshot = copy.deepcopy(family.model.state_dict())
