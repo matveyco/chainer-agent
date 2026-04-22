@@ -6,8 +6,8 @@
     "colyseusVersion": "0.15.28"
   },
   "rooms": {
-    "count": 2,
-    "tracks": ["stable", "training"],
+    "count": 1,
+    "tracks": ["training"],
     "agentsPerRoom": 12,
     "parallelTrainingBatches": true,
     "staggerMs": 5000,

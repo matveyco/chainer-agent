@@ -902,9 +902,15 @@ class RoomCoordinator {
         await session.bot.brain.reportEpisode({ ...summary, rank, roomSize });
       }
 
-      if (session.bot.strategicBrain && this.track === "stable" && this.mode === "training") {
+      if (session.bot.strategicBrain && this.mode === "training") {
         this.strategicBrains.set(session.bot.agentId, session.bot.strategicBrain);
-        await session.bot.strategicBrain.analyzeMatch({ ...summary, rank, roomSize }).catch(() => {});
+        // Fire LLM analysis in the background. Awaiting it serially blocks the
+        // next match by ~30-90s per agent (kimi-k2.5 reasoning latency × 12
+        // agents). The strategy diff lands on the bot/trainer well before the
+        // agent needs it for its NEXT match.
+        session.bot.strategicBrain
+          .analyzeMatch({ ...summary, rank, roomSize })
+          .catch(() => {});
       }
 
       agentResults.push({ ...this._buildAgentResult(session, summary), rank, roomSize });
