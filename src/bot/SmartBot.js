@@ -103,6 +103,15 @@ class SmartBot {
     this._stateUpdatesSeen = 0;
     this._inputsSent = 0;
     this._lastObstacleRays = null;
+    // Per-enemy {x, z, t} for velocity estimation used by lead-target aim.
+    // Keyed by enemy id; trimmed opportunistically in _updateEnemyTrack.
+    this._enemyTracks = new Map();
+    // Crystal-pickup proxy: when score jumps without a recent kill or damage
+    // deal, that's most likely a crystal pickup. Kept per match.
+    this._lastScoreSeen = 0;
+    this._crystalPickupsApprox = 0;
+    // Cached cluster direction (refreshed on each decision tick).
+    this._lastEnemyClusterDir = null;
   }
 
   async initBrain(trainerUrl) {
@@ -150,6 +159,16 @@ class SmartBot {
     if (this.searchClosestTimer <= 0) {
       this.closestEnemy = this.gameState.getClosestEnemy(this.userID, weaponRange);
       this.closestCrystal = this.gameState.getClosestCrystal(this.positionVector);
+      // Track every nearby enemy for velocity estimation (lead-target aim).
+      // Range is 1.5× weaponRange so we have a velocity estimate ready by the
+      // time an enemy enters firing range.
+      const nearby = this.gameState.getNearbyEnemies(this.userID, weaponRange * 1.5);
+      this._updateEnemyTracks(nearby);
+      this._lastEnemyClusterDir = this._computeEnemyClusterDir(nearby);
+      // Crystal-pickup proxy: any score gain not explained by recent damage
+      // dealt or kills is most likely a crystal pickup. Sample on the same
+      // cadence as the enemy search so we don't miss tight pickup windows.
+      this._sampleCrystalProxy();
       this.searchClosestTimer = 0.5;
       if (this.rttTimer <= 0) {
         this.room.send("room:rtt");
@@ -238,6 +257,7 @@ class SmartBot {
     const tactical = this.tacticalController.decide({
       enemy: this.closestEnemy ? this._getEnemyContext() : null,
       crystal: this.closestCrystal ? this._getCrystalContext() : null,
+      enemyClusterDir: this._lastEnemyClusterDir,
       strategy: this.strategicBrain?.getStrategyVector?.() || null,
       healthPercent: (this.data?.health || 100) / 100,
       weaponRange: this.data?.weaponTargetDistance || 20,
@@ -273,9 +293,10 @@ class SmartBot {
     input.animation = moveLen > 0.1 ? 2 : 0;
 
     if (this.closestEnemy) {
-      input.target[0] = this.closestEnemy.position.x + decision.aimOffsetX;
-      input.target[1] = this.closestEnemy.position.y || 0;
-      input.target[2] = this.closestEnemy.position.z + decision.aimOffsetZ;
+      const aim = this._computeLeadTarget(this.closestEnemy);
+      input.target[0] = aim.x + decision.aimOffsetX;
+      input.target[1] = aim.y;
+      input.target[2] = aim.z + decision.aimOffsetZ;
     } else if (this.closestCrystal) {
       input.target[0] = this.closestCrystal.x;
       input.target[1] = this.closestCrystal.y || 0;
@@ -297,7 +318,7 @@ class SmartBot {
     }
 
     if (decision.shouldUseAbility && this.abilityTimer <= 0) {
-      this._useAbility();
+      this._useAbility(decision.abilityHint);
       this.abilityTimer = rand(5, 15);
     }
   }
@@ -314,14 +335,24 @@ class SmartBot {
     this.coolDownTimer = this._getWeaponCooldownSeconds() + rand(0.05, 0.25);
   }
 
-  _useAbility() {
+  _useAbility(hint = null) {
     if (!this.data?.abilities) return;
-    const ability = ABILITIES[Math.floor(Math.random() * ABILITIES.length)];
-    const abilityData = this.data.abilities.get?.(ability);
-    if (abilityData?.ready) {
-      this.room.send("room:player:ability:use", { ability });
-      this.fitness.recordAbilityUse();
-      this.lastAbilityUsed = true;
+    // Honor the tactical controller's preferred ability if it's actually
+    // ready; otherwise fall through to any other ready ability so we don't
+    // sit on a 5–15s cooldown waiting for the perfect one.
+    const order = [];
+    if (hint && ABILITIES.includes(hint)) order.push(hint);
+    for (const id of ABILITIES) {
+      if (id !== hint) order.push(id);
+    }
+    for (const ability of order) {
+      const abilityData = this.data.abilities.get?.(ability);
+      if (abilityData?.ready) {
+        this.room.send("room:player:ability:use", { ability });
+        this.fitness.recordAbilityUse();
+        this.lastAbilityUsed = true;
+        return;
+      }
     }
   }
 
@@ -433,6 +464,134 @@ class SmartBot {
       Number(base.y ?? fallback.y) || 0,
       Number(base.z ?? fallback.z) + rand(-jitter, jitter),
     ];
+  }
+
+  /**
+   * Predict where the enemy will be when our projectile arrives. Linear
+   * extrapolation from the last two observed positions; aim point sits at
+   * `enemy.position + velocity * travelTime`. accuracy_focus modulates how
+   * much we lead — high focus = full lead, low focus = mostly dead-on so we
+   * keep the existing "spray and pray" behaviour for sloppy archetypes.
+   */
+  _computeLeadTarget(enemy) {
+    const fallback = {
+      x: enemy.position.x,
+      y: enemy.position.y || 0,
+      z: enemy.position.z,
+    };
+    if (!enemy?.id) return fallback;
+
+    const track = this._enemyTracks.get(enemy.id);
+    if (!track) return fallback;
+
+    const dt = (Date.now() - track.t) / 1000;
+    if (dt <= 0 || dt > 1.0) return fallback; // stale; don't trust velocity
+
+    const vx = (enemy.position.x - track.x) / dt;
+    const vz = (enemy.position.z - track.z) / dt;
+    // Cap velocity to game-plausible movement speed (~7-12 m/s).
+    const speed = Math.hypot(vx, vz);
+    if (speed > 15) return fallback;
+
+    const dx = enemy.position.x - this.positionArray[0];
+    const dz = enemy.position.z - this.positionArray[2];
+    const distance = Math.hypot(dx, dz);
+    const projectileSpeed = this._getProjectileSpeed();
+    const travelTime = distance / projectileSpeed;
+
+    const strategy = this.strategicBrain?.getStrategyVector?.() || {};
+    const focus = Math.max(0, Math.min(1, Number(strategy.accuracy_focus ?? 0.5) || 0.5));
+    const leadFactor = focus; // 0 = no lead, 1 = full lead
+
+    return {
+      x: enemy.position.x + vx * travelTime * leadFactor,
+      y: enemy.position.y || 0,
+      z: enemy.position.z + vz * travelTime * leadFactor,
+    };
+  }
+
+  _getProjectileSpeed() {
+    // Rocket projectile in this arena travels ~30 m/s. The exact constant
+    // isn't exposed in any contract we have, but lead-target with this value
+    // is much closer than dead-aim so it's still a clear win.
+    return 30;
+  }
+
+  /**
+   * Update per-enemy {x, z, t} tracks for velocity estimation. Called on the
+   * same 0.5s cadence as enemy search; entries that haven't been seen for
+   * >2s get dropped so the map can't grow unbounded across matches.
+   */
+  _updateEnemyTracks(nearbyEnemies) {
+    const now = Date.now();
+    const seen = new Set();
+    for (const enemy of nearbyEnemies) {
+      if (!enemy?.id || !enemy?.position) continue;
+      seen.add(enemy.id);
+      this._enemyTracks.set(enemy.id, {
+        x: enemy.position.x,
+        z: enemy.position.z,
+        t: now,
+      });
+    }
+    for (const [id, track] of this._enemyTracks) {
+      if (!seen.has(id) && now - track.t > 2000) {
+        this._enemyTracks.delete(id);
+      }
+    }
+  }
+
+  /**
+   * Direction to the centroid of nearby enemies. Powers the
+   * "no enemy in range, no crystal — go where the fight is" fallback in
+   * TacticalController.decide. Returns null if there's nothing to head toward.
+   */
+  _computeEnemyClusterDir(nearbyEnemies) {
+    if (!nearbyEnemies?.length) return null;
+    let sumX = 0;
+    let sumZ = 0;
+    let count = 0;
+    for (const enemy of nearbyEnemies) {
+      if (!enemy?.position) continue;
+      sumX += enemy.position.x;
+      sumZ += enemy.position.z;
+      count += 1;
+    }
+    if (!count) return null;
+    const cx = sumX / count - this.positionArray[0];
+    const cz = sumZ / count - this.positionArray[2];
+    const len = Math.hypot(cx, cz);
+    if (len < 1e-3) return null;
+    return { dirX: cx / len, dirZ: cz / len };
+  }
+
+  /**
+   * Approximate crystal pickups by counting score increases unaccompanied by
+   * recent damage-dealt or kills. This is a proxy because the server doesn't
+   * expose a "you picked up a crystal" event to bots, but it gives us a
+   * signal that's at least directionally correct in match summaries.
+   */
+  _sampleCrystalProxy() {
+    const score = Number(this.data?.score) || 0;
+    const delta = score - this._lastScoreSeen;
+    this._lastScoreSeen = score;
+    if (delta <= 0) return;
+    const recentlyHit = Date.now() - this.lastCombatAt < 1500;
+    if (!recentlyHit && delta > 0) {
+      this._crystalPickupsApprox += 1;
+      this.reporter?.incrementCounter("crystalPickupsApprox");
+    }
+  }
+
+  resetMatchStats() {
+    this._enemyTracks.clear();
+    this._lastEnemyClusterDir = null;
+    this._lastScoreSeen = 0;
+    this._crystalPickupsApprox = 0;
+  }
+
+  getCrystalPickupsApprox() {
+    return this._crystalPickupsApprox;
   }
 }
 

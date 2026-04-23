@@ -997,6 +997,13 @@ class RoomCoordinator {
       combatInactivityMs: runtime.combatInactivityMs || 0,
       inputsSent: runtime.inputsSent,
       stateUpdates: runtime.stateUpdates,
+      // Approximate crystal pickups: score gains the bot saw outside its
+      // combat window (no recent damage dealt or taken). Server doesn't expose
+      // a real pickup event so this is a proxy — useful for "is anyone
+      // collecting at all" tracking, not for a leaderboard.
+      crystalsCollectedApprox: typeof session.bot.getCrystalPickupsApprox === "function"
+        ? session.bot.getCrystalPickupsApprox()
+        : 0,
     };
   }
 

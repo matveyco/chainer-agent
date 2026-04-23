@@ -6,6 +6,22 @@ const RAYCAST_RANGE = 12; // metres — must match StateExtractor
 // route around. 0.35 ≈ 4.2 m of headroom — about one body length past a crate.
 const CLEAR_THRESHOLD = 0.35;
 
+// Behaviour thresholds. Raised once before, then lowered after observing that
+// half the archetypes (Sniper / Collector / Survivor / Tactician) were stuck
+// in pure strafe mode and never shooting beyond ~10 m. The new floors let
+// every archetype actually fight; Sniper still fights less because of its
+// other strategy params (low aggression -> only 0.15+ which keeps it
+// shooting from cover, low ability_usage -> still rare abilities).
+const ENGAGE_AGGRESSION_FLOOR = 0.35;
+const SHOOT_AGGRESSION_FLOOR = 0.15;
+const CRYSTAL_PRIORITY_FLOOR = 0.05;
+const ABILITY_USAGE_FLOOR = 0.2;
+
+// Ability identifiers must match SmartBot.ABILITIES exactly.
+const ABILITY_JUMP = "jump";
+const ABILITY_MINE = "minePlanting";
+const ABILITY_RAMPAGE = "rampage";
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -39,11 +55,15 @@ class TacticalController {
    * gradient updates downstream.
    *
    * @param {Object} ctx
-   * @param {Object|null} ctx.enemy   { distance, dirX, dirZ }
-   * @param {Object|null} ctx.crystal { dirX, dirZ, distance }
-   * @param {Object} ctx.position     { x, z }
-   * @param {Object} ctx.strategy     per-agent strategy params
-   * @param {number} ctx.healthPercent 0..1
+   * @param {Object|null} ctx.enemy            { distance, dirX, dirZ }
+   * @param {Object|null} ctx.crystal          { dirX, dirZ, distance }
+   * @param {Object|null} ctx.enemyClusterDir  { dirX, dirZ } pointing toward
+   *                                           the centroid of nearby enemies,
+   *                                           used as the no-enemy-no-crystal
+   *                                           fallback so bots seek the fight.
+   * @param {Object} ctx.position              { x, z }
+   * @param {Object} ctx.strategy              per-agent strategy params
+   * @param {number} ctx.healthPercent         0..1
    * @param {number} ctx.weaponRange
    * @param {boolean} ctx.cooldownReady
    * @param {boolean} ctx.abilityReady
@@ -73,11 +93,21 @@ class TacticalController {
       desiredZ = back.z;
       reasons.push("return_to_center");
     } else if (enemy && lowHealth) {
-      const strafeX = -enemy.dirZ * this.strafeSign;
-      const strafeZ = enemy.dirX * this.strafeSign;
-      desiredX = -enemy.dirX * 0.85 + strafeX * 0.3;
-      desiredZ = -enemy.dirZ * 0.85 + strafeZ * 0.3;
-      reasons.push("retreat_enemy");
+      // Cover-aware retreat: if the obstacle rays show somewhere we can put a
+      // wall between us and the enemy, head there instead of running in a
+      // straight line away.
+      const cover = this._findCover(enemy, ctx.obstacleRays);
+      if (cover) {
+        desiredX = cover.x;
+        desiredZ = cover.z;
+        reasons.push("retreat_to_cover");
+      } else {
+        const strafeX = -enemy.dirZ * this.strafeSign;
+        const strafeZ = enemy.dirX * this.strafeSign;
+        desiredX = -enemy.dirX * 0.85 + strafeX * 0.3;
+        desiredZ = -enemy.dirZ * 0.85 + strafeZ * 0.3;
+        reasons.push("retreat_enemy");
+      }
     } else if (enemy) {
       const strafeX = -enemy.dirZ * this.strafeSign;
       const strafeZ = enemy.dirX * this.strafeSign;
@@ -85,7 +115,7 @@ class TacticalController {
         desiredX = enemy.dirX * 0.9 + strafeX * 0.2;
         desiredZ = enemy.dirZ * 0.9 + strafeZ * 0.2;
         reasons.push("close_gap");
-      } else if (strategy.aggression >= 0.55) {
+      } else if (strategy.aggression >= ENGAGE_AGGRESSION_FLOOR) {
         desiredX = enemy.dirX * 0.6 + strafeX * 0.55;
         desiredZ = enemy.dirZ * 0.6 + strafeZ * 0.55;
         reasons.push("engage_enemy");
@@ -94,10 +124,17 @@ class TacticalController {
         desiredZ = strafeZ * 0.95 + enemy.dirZ * 0.15;
         reasons.push("strafe_enemy");
       }
-    } else if (ctx.crystal && strategy.crystal_priority >= 0.25) {
+    } else if (ctx.crystal && strategy.crystal_priority >= CRYSTAL_PRIORITY_FLOOR) {
       desiredX = ctx.crystal.dirX;
       desiredZ = ctx.crystal.dirZ;
       reasons.push("seek_crystal");
+    } else if (ctx.enemyClusterDir) {
+      // No nearby enemy and no crystal — head to where the action is rather
+      // than wander to (0, 0). This is the single biggest fix for the
+      // "bots stand around between fights" complaint.
+      desiredX = ctx.enemyClusterDir.dirX;
+      desiredZ = ctx.enemyClusterDir.dirZ;
+      reasons.push("seek_cluster");
     } else {
       const cx = -(ctx.position?.x || 0);
       const cz = -(ctx.position?.z || 0);
@@ -119,6 +156,7 @@ class TacticalController {
       aimOffsetZ: 0,
       shouldShoot: false,
       shouldUseAbility: false,
+      abilityHint: null,
     };
 
     if (
@@ -126,20 +164,27 @@ class TacticalController {
       ctx.cooldownReady &&
       distance <= engageRange * 1.05 &&
       !lowHealth &&
-      (strategy.aggression >= 0.3 || distance <= this.closeRange)
+      (strategy.aggression >= SHOOT_AGGRESSION_FLOOR || distance <= this.closeRange)
     ) {
       next.shouldShoot = true;
       reasons.push("shoot_enemy");
     }
 
-    if (
-      ctx.abilityReady &&
-      enemy &&
-      distance <= Math.max(8, weaponRange * 0.85) &&
-      (strategy.ability_usage >= 0.4 || lowHealth)
-    ) {
-      next.shouldUseAbility = true;
-      reasons.push("use_ability");
+    if (ctx.abilityReady) {
+      const ability = this._pickAbility({
+        enemy,
+        distance,
+        engageRange,
+        weaponRange,
+        lowHealth,
+        strategy,
+        reasons,
+      });
+      if (ability) {
+        next.shouldUseAbility = true;
+        next.abilityHint = ability;
+        reasons.push(`ability:${ability}`);
+      }
     }
 
     return {
@@ -156,6 +201,77 @@ class TacticalController {
    */
   stabilize(_action, ctx = {}) {
     return this.decide(ctx);
+  }
+
+  /**
+   * Pick a context-appropriate ability id, or null if nothing fits. The
+   * caller is responsible for confirming the chosen ability is actually ready.
+   * Three abilities (must match SmartBot.ABILITIES):
+   *   - jump:        gap-close OR low-HP escape
+   *   - minePlanting: drop area-denial behind us while retreating with enemy close
+   *   - rampage:     burst commit when engaging healthy
+   * Falls back to null when nothing tactical applies; a baseline `ability_usage`
+   * floor still allows rampage on engagement to add some chaos.
+   */
+  _pickAbility({ enemy, distance, engageRange, weaponRange, lowHealth, strategy }) {
+    if (!enemy) return null;
+
+    if (lowHealth && distance < weaponRange) {
+      // Retreating — jump first to clear distance; mine if enemy is hugging.
+      if (distance <= 8) return ABILITY_MINE;
+      return ABILITY_JUMP;
+    }
+
+    if (distance > engageRange && strategy.ability_usage >= ABILITY_USAGE_FLOOR) {
+      // Out of range — jump to gap-close.
+      return ABILITY_JUMP;
+    }
+
+    if (
+      distance <= engageRange &&
+      strategy.aggression >= ENGAGE_AGGRESSION_FLOOR &&
+      strategy.ability_usage >= ABILITY_USAGE_FLOOR
+    ) {
+      return ABILITY_RAMPAGE;
+    }
+
+    return null;
+  }
+
+  /**
+   * Look for a clearance pattern that puts an obstacle between us and the
+   * enemy, i.e. low clearance in the direction we choose AND that direction
+   * has at least some component AWAY from the enemy. Returns null if no good
+   * cover candidate exists (caller falls back to plain retreat).
+   */
+  _findCover(enemy, rays) {
+    if (!Array.isArray(rays) || rays.length !== RAYCAST_COUNT) return null;
+    const enemyDirX = enemy.dirX || 0;
+    const enemyDirZ = enemy.dirZ || 0;
+
+    let bestScore = -Infinity;
+    let bestX = 0;
+    let bestZ = 0;
+    for (let i = 0; i < RAYCAST_COUNT; i += 1) {
+      const a = (Math.PI * 2 * i) / RAYCAST_COUNT;
+      const rx = Math.cos(a);
+      const rz = Math.sin(a);
+      const awayFromEnemy = -(rx * enemyDirX + rz * enemyDirZ); // [-1, +1]; +1 = directly away
+      if (awayFromEnemy < -0.25) continue; // never run TOWARD the enemy
+      const clearance = rays[i];
+      if (clearance < CLEAR_THRESHOLD * 0.4) continue; // direction is impassable
+      // Reward: walls in the direction we move (low clearance flank rays at i±2),
+      // some away-from-enemy component, and a passable forward path.
+      const flankBlocked = (1 - rays[(i + 2) % RAYCAST_COUNT]) + (1 - rays[(i + RAYCAST_COUNT - 2) % RAYCAST_COUNT]);
+      const score = awayFromEnemy * 1.5 + flankBlocked * 0.8 + clearance * 0.4;
+      if (score > bestScore) {
+        bestScore = score;
+        bestX = rx;
+        bestZ = rz;
+      }
+    }
+    if (bestScore <= 0) return null;
+    return { x: bestX, z: bestZ };
   }
 
   /**
@@ -222,5 +338,9 @@ class TacticalController {
 TacticalController.RAYCAST_COUNT = RAYCAST_COUNT;
 TacticalController.RAYCAST_RANGE = RAYCAST_RANGE;
 TacticalController.CLEAR_THRESHOLD = CLEAR_THRESHOLD;
+TacticalController.ENGAGE_AGGRESSION_FLOOR = ENGAGE_AGGRESSION_FLOOR;
+TacticalController.SHOOT_AGGRESSION_FLOOR = SHOOT_AGGRESSION_FLOOR;
+TacticalController.CRYSTAL_PRIORITY_FLOOR = CRYSTAL_PRIORITY_FLOOR;
+TacticalController.ABILITY_USAGE_FLOOR = ABILITY_USAGE_FLOOR;
 
 module.exports = { TacticalController };

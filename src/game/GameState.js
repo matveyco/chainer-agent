@@ -21,6 +21,7 @@ class GameState {
     this.playerData = new Map(); // userID -> full player state from room.state
     this.battleCrystals = [];
     this.staticObstacles = []; // [{x, y, z, radius, kind, id}]
+    this._crystalLogged = false;
   }
 
   /**
@@ -36,6 +37,18 @@ class GameState {
       });
     }
     this.battleCrystals = snapshot.state.battleCrystals || [];
+    // One-shot per match: confirm whether the server actually sends crystals.
+    // If we never see this line, the server is using a different schema name
+    // and our crystal-seek behaviour is dead weight — file an upstream ask.
+    if (!this._crystalLogged && this.battleCrystals.length > 0) {
+      this._crystalLogged = true;
+      const sample = this.battleCrystals[0];
+      const sampleCoords = sample
+        ? `(${(sample.x ?? 0).toFixed(1)}, ${(sample.z ?? 0).toFixed(1)})`
+        : "?";
+      // eslint-disable-next-line no-console
+      console.log(`[crystal] count=${this.battleCrystals.length} first=${sampleCoords}`);
+    }
     return snapshot;
   }
 
@@ -267,6 +280,7 @@ class GameState {
     this.playerData.clear();
     this.battleCrystals = [];
     this.staticObstacles = [];
+    this._crystalLogged = false;
   }
 }
 
