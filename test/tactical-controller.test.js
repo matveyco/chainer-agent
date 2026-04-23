@@ -212,53 +212,223 @@ test("seek_cluster fallback heads toward enemy centroid when no enemy/crystal", 
 
 test("ability picker: jump on out-of-range engagement", () => {
   const controller = new TacticalController({ archetypeId: "hunter", seed: 0 });
-  const result = controller.decide({
-    enemy: { distance: 35, dirX: 1, dirZ: 0 }, // > engageRange (23)
-    strategy: { aggression: 0.9, ability_usage: 0.7 },
-    healthPercent: 1,
-    weaponRange: 20,
-    cooldownReady: true,
-    abilityReady: true,
-    position: { x: 0, z: 0 },
-    distanceFromCenter: 0,
-  });
+  const realRandom = Math.random;
+  Math.random = () => 0.99; // skip experimentation
+  try {
+    const result = controller.decide({
+      enemy: { distance: 35, dirX: 1, dirZ: 0 }, // > engageRange (23)
+      strategy: { aggression: 0.9, ability_usage: 0.7 },
+      healthPercent: 1,
+      weaponRange: 20,
+      cooldownReady: true,
+      abilityReady: true,
+      position: { x: 0, z: 0 },
+      distanceFromCenter: 0,
+    });
 
-  assert.equal(result.action.shouldUseAbility, true);
-  assert.equal(result.action.abilityHint, "jump");
+    assert.equal(result.action.shouldUseAbility, true);
+    assert.equal(result.action.abilityHint, "jump");
+  } finally {
+    Math.random = realRandom;
+  }
 });
 
 test("ability picker: rampage on healthy in-range engagement", () => {
   const controller = new TacticalController({ archetypeId: "berserker", seed: 0 });
-  const result = controller.decide({
-    enemy: { distance: 10, dirX: 1, dirZ: 0 },
-    strategy: { aggression: 1.0, ability_usage: 1.0, retreat_threshold: 0.0 },
-    healthPercent: 0.9,
-    weaponRange: 20,
-    cooldownReady: true,
-    abilityReady: true,
-    position: { x: 0, z: 0 },
-    distanceFromCenter: 0,
-  });
+  const realRandom = Math.random;
+  Math.random = () => 0.99;
+  try {
+    const result = controller.decide({
+      enemy: { distance: 10, dirX: 1, dirZ: 0 },
+      strategy: { aggression: 1.0, ability_usage: 1.0, retreat_threshold: 0.0 },
+      healthPercent: 0.9,
+      weaponRange: 20,
+      cooldownReady: true,
+      abilityReady: true,
+      position: { x: 0, z: 0 },
+      distanceFromCenter: 0,
+    });
 
-  assert.equal(result.action.shouldUseAbility, true);
-  assert.equal(result.action.abilityHint, "rampage");
+    assert.equal(result.action.shouldUseAbility, true);
+    assert.equal(result.action.abilityHint, "rampage");
+  } finally {
+    Math.random = realRandom;
+  }
 });
 
 test("ability picker: minePlanting on low-HP retreat with enemy hugging", () => {
   const controller = new TacticalController({ archetypeId: "guardian", seed: 0 });
-  const result = controller.decide({
-    enemy: { distance: 6, dirX: 1, dirZ: 0 },
-    strategy: { aggression: 0.7, ability_usage: 0.8, retreat_threshold: 0.4 },
-    healthPercent: 0.2, // low HP
-    weaponRange: 20,
-    cooldownReady: true,
-    abilityReady: true,
-    position: { x: 0, z: 0 },
-    distanceFromCenter: 0,
-  });
+  const realRandom = Math.random;
+  Math.random = () => 0.99;
+  try {
+    const result = controller.decide({
+      enemy: { distance: 6, dirX: 1, dirZ: 0 },
+      strategy: { aggression: 0.7, ability_usage: 0.8, retreat_threshold: 0.4 },
+      healthPercent: 0.2, // low HP
+      weaponRange: 20,
+      cooldownReady: true,
+      abilityReady: true,
+      position: { x: 0, z: 0 },
+      distanceFromCenter: 0,
+    });
 
-  assert.equal(result.action.shouldUseAbility, true);
-  assert.equal(result.action.abilityHint, "minePlanting");
+    assert.equal(result.action.shouldUseAbility, true);
+    assert.equal(result.action.abilityHint, "minePlanting");
+  } finally {
+    Math.random = realRandom;
+  }
+});
+
+test("universal panic: Berserker (retreat_threshold=0) still retreats below 15% HP", () => {
+  const controller = new TacticalController({ archetypeId: "berserker", seed: 0 });
+  const realRandom = Math.random;
+  Math.random = () => 0.99; // disable experimentation
+  try {
+    const result = controller.decide({
+      enemy: { distance: 8, dirX: 1, dirZ: 0 },
+      strategy: { aggression: 1.0, accuracy_focus: 0.2, ability_usage: 1.0, retreat_threshold: 0.0 },
+      healthPercent: 0.1, // 10% HP — below the 15% panic floor
+      weaponRange: 20,
+      cooldownReady: true,
+      abilityReady: true,
+      position: { x: 0, z: 0 },
+      distanceFromCenter: 0,
+    });
+
+    // Pre-fix Berserker would engage at 10% HP. With panic floor it retreats.
+    const isRetreating = result.reasons.some((r) => r.startsWith("retreat"));
+    assert.equal(isRetreating, true, `expected retreat reason, got ${result.reasons.join(",")}`);
+    assert.equal(result.action.shouldShoot, false);
+  } finally {
+    Math.random = realRandom;
+  }
+});
+
+test("outnumbered: 3+ close enemies trigger retreat even at full HP", () => {
+  const controller = new TacticalController({ archetypeId: "guardian", seed: 0 });
+  const realRandom = Math.random;
+  Math.random = () => 0.99;
+  try {
+    const result = controller.decide({
+      enemy: { distance: 8, dirX: 1, dirZ: 0 },
+      nearbyEnemyCount: 4,
+      strategy: { aggression: 0.7, ability_usage: 0.8, retreat_threshold: 0.25 },
+      healthPercent: 1.0, // full HP — but outnumbered
+      weaponRange: 20,
+      cooldownReady: true,
+      position: { x: 0, z: 0 },
+      distanceFromCenter: 0,
+    });
+
+    assert.equal(result.reasons.includes("retreat_outnumbered"), true,
+      `expected retreat_outnumbered, got ${result.reasons.join(",")}`);
+  } finally {
+    Math.random = realRandom;
+  }
+});
+
+test("outnumbered: Berserker (aggression=1.0) is exempt from outnumbered retreat", () => {
+  const controller = new TacticalController({ archetypeId: "berserker", seed: 0 });
+  const realRandom = Math.random;
+  Math.random = () => 0.99;
+  try {
+    const result = controller.decide({
+      enemy: { distance: 8, dirX: 1, dirZ: 0 },
+      nearbyEnemyCount: 5, // surrounded
+      strategy: { aggression: 1.0, ability_usage: 1.0, retreat_threshold: 0.0 },
+      healthPercent: 0.9,
+      weaponRange: 20,
+      cooldownReady: true,
+      position: { x: 0, z: 0 },
+      distanceFromCenter: 0,
+    });
+
+    // Berserker should still engage despite being outnumbered.
+    assert.equal(result.reasons.includes("engage_enemy"), true,
+      `Berserker should engage despite outnumbered, got ${result.reasons.join(",")}`);
+  } finally {
+    Math.random = realRandom;
+  }
+});
+
+test("ability picker: panic jump on recent damage taken", () => {
+  const controller = new TacticalController({ archetypeId: "tactician", seed: 0 });
+  const realRandom = Math.random;
+  Math.random = () => 0.99;
+  try {
+    const result = controller.decide({
+      enemy: { distance: 12, dirX: 1, dirZ: 0 },
+      recentDamageTaken: 30, // just took serious damage
+      strategy: { aggression: 0.5, ability_usage: 0.5, retreat_threshold: 0.35 },
+      healthPercent: 0.7,
+      weaponRange: 20,
+      cooldownReady: true,
+      abilityReady: true,
+      position: { x: 0, z: 0 },
+      distanceFromCenter: 0,
+    });
+
+    assert.equal(result.action.shouldUseAbility, true);
+    assert.equal(result.action.abilityHint, "jump");
+  } finally {
+    Math.random = realRandom;
+  }
+});
+
+test("ability picker: area-denial mine when stationary >4s with no enemy", () => {
+  const controller = new TacticalController({ archetypeId: "guardian", seed: 0 });
+  const realRandom = Math.random;
+  Math.random = () => 0.99;
+  try {
+    const result = controller.decide({
+      enemy: null,
+      stationaryMs: 5000,
+      strategy: { aggression: 0.7, ability_usage: 0.8, retreat_threshold: 0.25 },
+      healthPercent: 1.0,
+      weaponRange: 20,
+      abilityReady: true,
+      position: { x: 0, z: 0 },
+      distanceFromCenter: 0,
+    });
+
+    assert.equal(result.action.shouldUseAbility, true);
+    assert.equal(result.action.abilityHint, "minePlanting");
+  } finally {
+    Math.random = realRandom;
+  }
+});
+
+test("ability picker: experimentation rolls a random ability when die comes up low", () => {
+  const controller = new TacticalController({ archetypeId: "berserker", seed: 0 });
+  const realRandom = Math.random;
+  // First Math.random call = experimentation roll (passes); second = ability index pick.
+  let calls = 0;
+  Math.random = () => {
+    calls += 1;
+    if (calls === 1) return 0.0;  // pass the explore gate
+    if (calls === 2) return 0.4;  // pick index 1 of 3 abilities -> ABILITY_MINE
+    return 0.99;
+  };
+  try {
+    const result = controller.decide({
+      enemy: { distance: 12, dirX: 1, dirZ: 0 },
+      strategy: { aggression: 1.0, ability_usage: 1.0, retreat_threshold: 0.0 },
+      healthPercent: 0.9,
+      weaponRange: 20,
+      cooldownReady: true,
+      abilityReady: true,
+      position: { x: 0, z: 0 },
+      distanceFromCenter: 0,
+    });
+
+    assert.equal(result.action.shouldUseAbility, true);
+    // Should have picked an ability via experimentation, not via context
+    // (context would have produced rampage given engageRange + aggression).
+    assert.ok(["jump", "minePlanting", "rampage"].includes(result.action.abilityHint),
+      `expected one of the abilities, got ${result.action.abilityHint}`);
+  } finally {
+    Math.random = realRandom;
+  }
 });
 
 test("cover-aware retreat: prefers direction with flank obstacles", () => {

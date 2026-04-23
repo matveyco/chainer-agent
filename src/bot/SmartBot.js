@@ -165,6 +165,10 @@ class SmartBot {
       const nearby = this.gameState.getNearbyEnemies(this.userID, weaponRange * 1.5);
       this._updateEnemyTracks(nearby);
       this._lastEnemyClusterDir = this._computeEnemyClusterDir(nearby);
+      // Outnumbered detection: count enemies within close-quarters range so the
+      // tactical controller can trigger retreat-style behaviour even at full HP.
+      const closeNearby = this.gameState.getNearbyEnemies(this.userID, weaponRange);
+      this._lastNearbyEnemyCount = closeNearby.length;
       // Crystal-pickup proxy: any score gain not explained by recent damage
       // dealt or kills is most likely a crystal pickup. Sample on the same
       // cadence as the enemy search so we don't miss tight pickup windows.
@@ -222,6 +226,11 @@ class SmartBot {
         this.lastCombatAt = Date.now();
       }
 
+      // Carry damage-taken into the *next* decision so the tactical ability
+      // picker can react to it (panic-jump). Clearing _lastDamageTaken here
+      // would make the signal vanish before decide() consumes it.
+      this._recentDamageTakenWindow = this._lastDamageTaken;
+
       this._lastGotKill = false;
       this._lastDied = false;
       this._lastDamageDealt = 0;
@@ -260,6 +269,9 @@ class SmartBot {
       enemy: this.closestEnemy ? this._getEnemyContext() : null,
       crystal: this.closestCrystal ? this._getCrystalContext() : null,
       enemyClusterDir: this._lastEnemyClusterDir,
+      nearbyEnemyCount: this._lastNearbyEnemyCount || 0,
+      recentDamageTaken: this._recentDamageTakenWindow || 0,
+      stationaryMs: this._computeStationaryMs(),
       strategy: this.strategicBrain?.getStrategyVector?.() || null,
       healthPercent: (this.data?.health || 100) / 100,
       weaponRange: this.data?.weaponTargetDistance || 20,
@@ -408,6 +420,29 @@ class SmartBot {
    *
    * Returns a {x, z} unit-ish vector when an escape is active, else null.
    */
+  /**
+   * Time spent inside a small radius (~2.5 m) using the same position ring
+   * the stuck-escape uses. Returns ms; 0 if we don't have enough history or
+   * if the bot has been moving freely.
+   */
+  _computeStationaryMs() {
+    if (!this._stuckSamples?.length) return 0;
+    const now = Date.now();
+    let cx = 0;
+    let cz = 0;
+    for (const s of this._stuckSamples) {
+      cx += s.x;
+      cz += s.z;
+    }
+    cx /= this._stuckSamples.length;
+    cz /= this._stuckSamples.length;
+    const px = this.positionArray[0];
+    const pz = this.positionArray[2];
+    const radius = Math.hypot(px - cx, pz - cz);
+    if (radius > 2.5) return 0;
+    return now - this._stuckSamples[0].t;
+  }
+
   _maybeEscapeStuckCorner() {
     const now = Date.now();
     if (!this._stuckSamples) {
@@ -433,12 +468,25 @@ class SmartBot {
     // Require at least ~3 s of actual elapsed history before judging "stuck"
     // (length alone isn't enough — at 20 Hz, 6 samples is only 300 ms).
     if (now - this._stuckSamples[0].t < 3000) return null;
-    const oldest = this._stuckSamples[0];
-    const moved = Math.hypot(
-      this.positionArray[0] - oldest.x,
-      this.positionArray[2] - oldest.z
-    );
-    if (moved >= 1.0) return null; // moved enough; not stuck
+    // Centroid-radius check: total displacement isn't enough — a bot
+    // oscillating along a wall can travel >1 m without making progress.
+    // Compute the centroid of the last 3 s of positions and check the
+    // bounding radius. If every sample sits within ~2 m of the centroid the
+    // bot is wedged regardless of how far it "moved".
+    let cx = 0;
+    let cz = 0;
+    for (const s of this._stuckSamples) {
+      cx += s.x;
+      cz += s.z;
+    }
+    cx /= this._stuckSamples.length;
+    cz /= this._stuckSamples.length;
+    let radius = 0;
+    for (const s of this._stuckSamples) {
+      const d = Math.hypot(s.x - cx, s.z - cz);
+      if (d > radius) radius = d;
+    }
+    if (radius >= 2.0) return null; // moving freely within a 4m+ region
 
     // Pick the most-clear ray as escape direction so we don't push back into
     // the wall we were stuck on. If we have no rays, just pick a random

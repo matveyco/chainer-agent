@@ -17,10 +17,23 @@ const SHOOT_AGGRESSION_FLOOR = 0.15;
 const CRYSTAL_PRIORITY_FLOOR = 0.05;
 const ABILITY_USAGE_FLOOR = 0.2;
 
+// Universal "I'm about to die" floor — even Berserker (retreat_threshold=0)
+// pulls back below 15% HP. This is "survivor tactics for everyone" without
+// erasing per-archetype identity (Survivor still retreats much earlier).
+const PANIC_HEALTH_FLOOR = 0.15;
+// Outnumbered if this many enemies are within close range simultaneously.
+const OUTNUMBERED_THRESHOLD = 3;
+// Probability per decision tick of picking a random ready ability instead
+// of the contextual choice. Lets the population discover unusual tactical
+// uses (e.g. mine in the middle of a fight, jump as a feint) that we
+// wouldn't have hand-coded.
+const ABILITY_EXPLORE_PROB = 0.08;
+
 // Ability identifiers must match SmartBot.ABILITIES exactly.
 const ABILITY_JUMP = "jump";
 const ABILITY_MINE = "minePlanting";
 const ABILITY_RAMPAGE = "rampage";
+const ALL_ABILITIES = [ABILITY_JUMP, ABILITY_MINE, ABILITY_RAMPAGE];
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -80,7 +93,17 @@ class TacticalController {
     const weaponRange = Math.max(6, ctx.weaponRange || 20);
     const engageRange = weaponRange * this.enemyRangeRatio;
     const healthPercent = ctx.healthPercent ?? 1;
-    const lowHealth = healthPercent <= strategy.retreat_threshold;
+    // Survivor tactics for every archetype: respect the per-archetype retreat
+    // threshold (Survivor at 0.7, Berserker at 0.0) but enforce a hard 15%
+    // floor — a near-dead Berserker still pulls back briefly, otherwise it
+    // dies on every encounter. Visible to the user as fewer "bot stands and
+    // dies" scenes.
+    const effectiveRetreat = Math.max(strategy.retreat_threshold, PANIC_HEALTH_FLOOR);
+    const lowHealth = healthPercent <= effectiveRetreat;
+    const nearbyEnemyCount = Number(ctx.nearbyEnemyCount) || (enemy ? 1 : 0);
+    // Outnumbered = retreat-style behaviour even if HP is fine. Berserker
+    // (aggression > 0.9) is exempt because that's literally its thing.
+    const outnumbered = nearbyEnemyCount >= OUTNUMBERED_THRESHOLD && strategy.aggression < 0.9;
     const distanceFromCenter = ctx.distanceFromCenter || 0;
     const outOfBounds = distanceFromCenter > this.safeSize * 0.92;
 
@@ -92,21 +115,24 @@ class TacticalController {
       desiredX = back.x;
       desiredZ = back.z;
       reasons.push("return_to_center");
-    } else if (enemy && lowHealth) {
+    } else if (enemy && (lowHealth || outnumbered)) {
       // Cover-aware retreat: if the obstacle rays show somewhere we can put a
       // wall between us and the enemy, head there instead of running in a
-      // straight line away.
+      // straight line away. Now also triggers when outnumbered (3+ enemies in
+      // close range) so even healthy aggressive bots disengage when focused.
+      const reasonTag = outnumbered && !lowHealth ? "retreat_outnumbered" : "retreat_enemy";
+      const coverTag = outnumbered && !lowHealth ? "retreat_outnumbered" : "retreat_to_cover";
       const cover = this._findCover(enemy, ctx.obstacleRays);
       if (cover) {
         desiredX = cover.x;
         desiredZ = cover.z;
-        reasons.push("retreat_to_cover");
+        reasons.push(coverTag);
       } else {
         const strafeX = -enemy.dirZ * this.strafeSign;
         const strafeZ = enemy.dirX * this.strafeSign;
         desiredX = -enemy.dirX * 0.85 + strafeX * 0.3;
         desiredZ = -enemy.dirZ * 0.85 + strafeZ * 0.3;
-        reasons.push("retreat_enemy");
+        reasons.push(reasonTag);
       }
     } else if (enemy) {
       const strafeX = -enemy.dirZ * this.strafeSign;
@@ -177,7 +203,11 @@ class TacticalController {
         engageRange,
         weaponRange,
         lowHealth,
+        outnumbered,
+        nearbyEnemyCount,
         strategy,
+        recentDamageTaken: Number(ctx.recentDamageTaken) || 0,
+        stationaryMs: Number(ctx.stationaryMs) || 0,
         reasons,
       });
       if (ability) {
@@ -204,20 +234,74 @@ class TacticalController {
   }
 
   /**
-   * Pick a context-appropriate ability id, or null if nothing fits. The
-   * caller is responsible for confirming the chosen ability is actually ready.
+   * Pick a context-appropriate ability id, or null if nothing fits. Caller
+   * is responsible for confirming the ability is actually ready (cooldown).
    * Three abilities (must match SmartBot.ABILITIES):
-   *   - jump:        gap-close OR low-HP escape
-   *   - minePlanting: drop area-denial behind us while retreating with enemy close
-   *   - rampage:     burst commit when engaging healthy
-   * Falls back to null when nothing tactical applies; a baseline `ability_usage`
-   * floor still allows rampage on engagement to add some chaos.
+   *   - jump:        gap-close, low-HP escape, OR panic-jump on recent damage
+   *   - minePlanting: area denial — behind us during retreat OR when stationary
+   *                   for a while in a busy zone, OR random experimentation
+   *   - rampage:     burst commit when engaged healthy OR last-stand outnumbered
+   *
+   * Also rolls an 8% "experimentation" die: pick a random ability from the
+   * pool instead of the contextual choice. Lets the population discover
+   * unconventional tactical uses (e.g. mines mid-fight, jump as a feint)
+   * that PBT/PPO can then reinforce if they pay off.
    */
-  _pickAbility({ enemy, distance, engageRange, weaponRange, lowHealth, strategy }) {
-    if (!enemy) return null;
+  _pickAbility({
+    enemy,
+    distance,
+    engageRange,
+    weaponRange,
+    lowHealth,
+    outnumbered,
+    nearbyEnemyCount,
+    strategy,
+    recentDamageTaken,
+    stationaryMs,
+  }) {
+    // Experimentation: small probability of picking a non-contextual ability.
+    // Only fires if the agent has any base willingness to use abilities at
+    // all; that way Collector (ability_usage=0.2) experiments rarely while
+    // Berserker (1.0) experiments often.
+    if (
+      strategy.ability_usage >= ABILITY_USAGE_FLOOR &&
+      Math.random() < ABILITY_EXPLORE_PROB * strategy.ability_usage
+    ) {
+      const choice = ALL_ABILITIES[Math.floor(Math.random() * ALL_ABILITIES.length)];
+      return choice;
+    }
+
+    // Last-stand rampage when outnumbered with HP still up — better to take
+    // some down with you than die strafing.
+    if (
+      outnumbered &&
+      !lowHealth &&
+      strategy.ability_usage >= ABILITY_USAGE_FLOOR
+    ) {
+      return ABILITY_RAMPAGE;
+    }
+
+    // No enemy in range — area denial. If we've been planted in one spot for
+    // a few seconds, drop a mine; it might catch a wanderer.
+    if (!enemy) {
+      if (
+        stationaryMs >= 4000 &&
+        strategy.ability_usage >= ABILITY_USAGE_FLOOR
+      ) {
+        return ABILITY_MINE;
+      }
+      return null;
+    }
+
+    // Panic jump: just took meaningful damage, get out of the danger arc.
+    // Even passive archetypes use this — it's a survival reflex.
+    if (recentDamageTaken >= 25 && distance <= weaponRange) {
+      return ABILITY_JUMP;
+    }
 
     if (lowHealth && distance < weaponRange) {
-      // Retreating — jump first to clear distance; mine if enemy is hugging.
+      // Retreating — mine if enemy is hugging (drop it behind), otherwise
+      // jump to clear distance.
       if (distance <= 8) return ABILITY_MINE;
       return ABILITY_JUMP;
     }
