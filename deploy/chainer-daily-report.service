@@ -1,0 +1,14 @@
+[Unit]
+Description=Chainer Agent — Daily Report Snapshot
+After=chainer-trainer.service chainer-bots.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/chainer-agent
+EnvironmentFile=%h/chainer-agent/.env
+ExecStart=/usr/bin/node scripts/daily_report.js --write
+StandardOutput=append:%h/chainer-agent/daily_report.log
+StandardError=append:%h/chainer-agent/daily_report.log
+
+[Install]
+WantedBy=default.target

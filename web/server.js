@@ -323,6 +323,23 @@ app.get("/api/diagnostics", async (req, res) => {
   }
 });
 
+// Daily report — generates on demand. ?hours=N to widen the window
+// (default 24). ?format=json for raw data; default returns rendered Markdown.
+app.get("/api/report/daily", async (req, res) => {
+  try {
+    const { buildReport, renderMarkdown } = require("../scripts/daily_report");
+    const hours = Math.max(1, Math.min(720, Number(req.query.hours) || 24));
+    const report = await buildReport({ hours });
+    if (req.query.format === "json") {
+      res.json(report);
+    } else {
+      res.type("text/markdown").send(renderMarkdown(report));
+    }
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
 app.get("/api/model/:id/aliases", async (req, res) => {
   try {
     const aliases = await fetchJSON(TRAINER_URL, `/model/${req.params.id}/aliases`);

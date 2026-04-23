@@ -1,0 +1,13 @@
+[Unit]
+Description=Chainer Agent — Daily Report (timer)
+
+[Timer]
+# Fire once a day at 06:00 local. Persistent=true catches missed runs after
+# a reboot — we'll always have at least the previous day's snapshot.
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+RandomizedDelaySec=120
+Unit=chainer-daily-report.service
+
+[Install]
+WantedBy=timers.target
