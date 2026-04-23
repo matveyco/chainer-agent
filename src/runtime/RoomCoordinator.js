@@ -759,23 +759,27 @@ class RoomCoordinator {
     let matchResolved = false;
     const matchStartedAt = Date.now();
 
-    // Three independent watchdog signals (any one ends the match):
+    // Four independent watchdog signals (any one ends the match):
     //
     //   1. ROOM:TIME SILENT — server has stopped sending its clock updates.
-    //      In a healthy match these arrive once per second. We tolerate ~90s
-    //      of silence to absorb transient network blips, then declare the
-    //      room dead. Pre-fix this was 15 minutes which left bots wedged in
-    //      zombie matches for that entire window.
+    //      Healthy matches send these ~1/sec. ~90s of silence = dead room.
+    //      Catches: server-side queue glitches, broken connections.
     //
-    //   2. STATE-UPDATE FROZEN — the bots' state-update counter (sum across
-    //      all bots, every state snapshot from the server bumps it) hasn't
-    //      grown for >60s. Catches the case where the server keeps the
-    //      connection open but stops broadcasting world state.
+    //   2. STATE-UPDATE FROZEN — sum of bot state-update counters has not
+    //      grown for >60s. Catches: server keeps connection open but stops
+    //      broadcasting world state.
     //
-    //   3. ABSOLUTE HARD CAP — `matchTimeout` (default 15min). Final defense
-    //      against any combination of bugs that mask both signals above.
+    //   3. INPUTS FROZEN — sum of bot input-send counters has not grown for
+    //      >60s. Catches: bots connected and receiving state, but their own
+    //      send loop has wedged (e.g. mass-death without respawn detection,
+    //      gameLoop short-circuiting due to !this.alive). This is a NEW
+    //      signal added after observing the original three didn't catch a
+    //      "bots receiving state but never sending inputs" wedge.
+    //
+    //   4. ABSOLUTE HARD CAP — matchTimeout (default 15min). Final defence.
     const silenceMs = Number(this.config.bot?.serverSilenceTimeoutMs) || 90_000;
     const inactivityMs = Number(this.config.bot?.stateUpdateTimeoutMs) || 60_000;
+    const inputFrozenMs = Number(this.config.bot?.inputFrozenTimeoutMs) || 60_000;
     const hardCapMs = Math.max(Number(this.config.bot?.matchTimeout) || 900_000, 60_000);
 
     let lastTimeLeftMs = null;
@@ -796,6 +800,16 @@ class RoomCoordinator {
       let total = 0;
       for (const session of connectedSessions) {
         total += session.bot?._stateUpdatesSeen || 0;
+      }
+      return total;
+    };
+
+    let lastInputTotal = 0;
+    let lastInputAt = matchStartedAt;
+    const sumInputs = () => {
+      let total = 0;
+      for (const session of connectedSessions) {
+        total += session.bot?._inputsSent || 0;
       }
       return total;
     };
@@ -860,6 +874,19 @@ class RoomCoordinator {
         } else if (now - lastStateUpdateAt >= inactivityMs) {
           clearInterval(watchdog);
           finish("activity-frozen");
+          return;
+        }
+
+        // (e) inputs frozen — bots are receiving state but their own send
+        // loop has stopped. Mass-dead-no-respawn is the canonical case
+        // (update() returns early when !this.alive, so no inputs go out).
+        const inputs = sumInputs();
+        if (inputs > lastInputTotal) {
+          lastInputTotal = inputs;
+          lastInputAt = now;
+        } else if (now - lastInputAt >= inputFrozenMs) {
+          clearInterval(watchdog);
+          finish("inputs-frozen");
         }
       }, 5000);
     });
