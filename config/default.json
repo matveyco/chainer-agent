@@ -36,6 +36,8 @@
   },
   "bot": {
     "matchTimeout": 900000,
+    "serverSilenceTimeoutMs": 90000,
+    "stateUpdateTimeoutMs": 60000,
     "respawnDelay": 3,
     "clientStaggerMs": 100,
     "decisionIntervalTicks": 3,

@@ -757,11 +757,27 @@ class RoomCoordinator {
 
   async _runMatchLoop(selection, connectedSessions) {
     let matchResolved = false;
+    const matchStartedAt = Date.now();
 
-    // Track server-reported time-left so we don't quit a match the server is
-    // still running. The chainers room (TimeLimited) typically runs for
-    // ~10 minutes; the local matchTimeout is purely a safety net for the case
-    // where the server stops sending room:time updates entirely.
+    // Three independent watchdog signals (any one ends the match):
+    //
+    //   1. ROOM:TIME SILENT — server has stopped sending its clock updates.
+    //      In a healthy match these arrive once per second. We tolerate ~90s
+    //      of silence to absorb transient network blips, then declare the
+    //      room dead. Pre-fix this was 15 minutes which left bots wedged in
+    //      zombie matches for that entire window.
+    //
+    //   2. STATE-UPDATE FROZEN — the bots' state-update counter (sum across
+    //      all bots, every state snapshot from the server bumps it) hasn't
+    //      grown for >60s. Catches the case where the server keeps the
+    //      connection open but stops broadcasting world state.
+    //
+    //   3. ABSOLUTE HARD CAP — `matchTimeout` (default 15min). Final defense
+    //      against any combination of bugs that mask both signals above.
+    const silenceMs = Number(this.config.bot?.serverSilenceTimeoutMs) || 90_000;
+    const inactivityMs = Number(this.config.bot?.stateUpdateTimeoutMs) || 60_000;
+    const hardCapMs = Math.max(Number(this.config.bot?.matchTimeout) || 900_000, 60_000);
+
     let lastTimeLeftMs = null;
     let lastTimeUpdateAt = null;
     const trackTime = (data) => {
@@ -774,17 +790,28 @@ class RoomCoordinator {
       session.room?.onMessage("room:time", trackTime);
     }
 
+    let lastStateUpdateTotal = 0;
+    let lastStateUpdateAt = matchStartedAt;
+    const sumStateUpdates = () => {
+      let total = 0;
+      for (const session of connectedSessions) {
+        total += session.bot?._stateUpdatesSeen || 0;
+      }
+      return total;
+    };
+
     const matchEndPromise = new Promise((resolve) => {
       const primary = connectedSessions[0];
       const finish = (reason) => {
         if (matchResolved) return;
         matchResolved = true;
         if (reason) {
-          this.runtimeState.recordEvent("info", "match end", {
-            roomIndex: this.roomIndex,
-            reason,
-            lastTimeLeftMs,
-          });
+          this.runtimeState.recordEvent(
+            reason.startsWith("server-") || reason.startsWith("activity-") ? "warn" : "info",
+            "match end",
+            { roomIndex: this.roomIndex, reason, lastTimeLeftMs }
+          );
+          this.runtimeState.incrementCounter(`matchEnd:${reason}`);
         }
         resolve();
       };
@@ -794,24 +821,45 @@ class RoomCoordinator {
         primary.room.onLeave(() => finish("leave"));
       }
 
-      // Safety-net poll: only force-end if (a) the server has gone silent on
-      // room:time for >60s AND we've waited at least matchTimeout, OR (b) the
-      // server explicitly reported left<=0. Otherwise trust the server clock.
-      const safetyMs = Math.max(this.config.bot.matchTimeout, 60000);
       const watchdog = setInterval(() => {
         if (matchResolved) {
           clearInterval(watchdog);
           return;
         }
+        const now = Date.now();
+
+        // (a) explicit server clock end
         if (lastTimeLeftMs !== null && lastTimeLeftMs <= 0) {
           clearInterval(watchdog);
           finish("server-time-zero");
           return;
         }
-        const silentMs = lastTimeUpdateAt ? Date.now() - lastTimeUpdateAt : safetyMs;
-        if (silentMs >= safetyMs) {
+
+        // (b) absolute hard cap — last line of defence
+        if (now - matchStartedAt >= hardCapMs) {
+          clearInterval(watchdog);
+          finish("hard-cap");
+          return;
+        }
+
+        // (c) room:time silent for too long
+        const silentMs = now - (lastTimeUpdateAt ?? matchStartedAt);
+        if (silentMs >= silenceMs) {
           clearInterval(watchdog);
           finish("server-silent");
+          return;
+        }
+
+        // (d) state-update stream frozen — bots are connected but the world
+        // isn't ticking. Sample once per watchdog interval; reset the timer
+        // any time the counter advances.
+        const total = sumStateUpdates();
+        if (total > lastStateUpdateTotal) {
+          lastStateUpdateTotal = total;
+          lastStateUpdateAt = now;
+        } else if (now - lastStateUpdateAt >= inactivityMs) {
+          clearInterval(watchdog);
+          finish("activity-frozen");
         }
       }, 5000);
     });
@@ -843,6 +891,9 @@ class RoomCoordinator {
     await matchEndPromise;
     clearInterval(gameLoop);
     clearInterval(flushInterval);
+    // Note: we don't leave rooms here — runMatch's finally calls
+    // _cleanupSessions which handles room.leave() + bot.dispose() + queue
+    // exit. Doing it twice risks double-leave errors on already-closed rooms.
 
     this.runtimeState.updateRoom(this.roomIndex, {
       phase: "finalizing",
