@@ -425,10 +425,14 @@ class SmartBot {
       z: this.positionArray[2],
       t: now,
     });
-    while (this._stuckSamples.length && now - this._stuckSamples[0].t > 3000) {
+    // Keep the last ~5 s of position history. Samples come in at the
+    // decision rate (~20 Hz) so a 3 s span is ~60 entries.
+    while (this._stuckSamples.length && now - this._stuckSamples[0].t > 5000) {
       this._stuckSamples.shift();
     }
-    if (this._stuckSamples.length < 6) return null;
+    // Require at least ~3 s of actual elapsed history before judging "stuck"
+    // (length alone isn't enough — at 20 Hz, 6 samples is only 300 ms).
+    if (now - this._stuckSamples[0].t < 3000) return null;
     const oldest = this._stuckSamples[0];
     const moved = Math.hypot(
       this.positionArray[0] - oldest.x,
