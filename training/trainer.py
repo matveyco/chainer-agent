@@ -92,6 +92,13 @@ REWARD_WEIGHT_DEFAULTS = {
     "accuracyWeight": 0.05,
     "antiSuicidePenalty": -0.3,
     "matchRankBonus": 25.0,
+    # Hybrid policy blend: how much the NN's action influences the bot's
+    # behaviour vs the scripted tactical controller. 0 = pure tactical,
+    # 1 = pure NN. Default 0.1 so the NN starts mattering for behaviour
+    # (and therefore its gradients become credible) without regressing the
+    # polished scripted play. PBT mutates this per agent: if NN actually
+    # helps, the alpha drifts up for top performers over generations.
+    "policyBlendAlpha": 0.1,
 }
 # Bounds keep mutated weights in a sensible range so the PBT explore step
 # can't push them to absurd values that break training.
@@ -106,6 +113,7 @@ REWARD_WEIGHT_BOUNDS = {
     "accuracyWeight": (0.0, 5.0),
     "antiSuicidePenalty": (-3.0, 0.0),
     "matchRankBonus": (1.0, 200.0),
+    "policyBlendAlpha": (0.0, 1.0),
 }
 PBT_LOG = LOGS_DIR / "pbt.jsonl"
 

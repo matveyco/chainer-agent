@@ -60,6 +60,19 @@ class AgentBrain {
     }
   }
 
+  /**
+   * Hybrid policy blend weight (0=pure tactical, 1=pure NN). Lives inside
+   * the per-agent reward_weights dict so PBT mutates it as part of the
+   * genome and the LLM coach can suggest deltas alongside the regular
+   * strategy params. Bot reads it on every decision via SmartBot's
+   * _getPolicyBlendAlpha().
+   */
+  getPolicyBlendAlpha() {
+    const raw = Number(this.rewardConfig?.policyBlendAlpha);
+    if (!Number.isFinite(raw)) return 0.1;
+    return Math.max(0, Math.min(1, raw));
+  }
+
   async init() {
     // Fetch agent-specific reward weights first so any subsequent recordStep
     // calls use the per-agent genome instead of the global defaults.

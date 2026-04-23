@@ -198,7 +198,7 @@ class SmartBot {
 
       this.decisionInFlight = true;
       this.brain.decide(stateVector)
-        .then(() => this._applyDecision())
+        .then((nnDecision) => this._applyDecision(nnDecision))
         .catch(() => {})
         .finally(() => {
           this.decisionInFlight = false;
@@ -245,15 +245,17 @@ class SmartBot {
     this.inputIndex = (this.inputIndex + 1) % INPUT_BUFFER_SIZE;
   }
 
-  _applyDecision() {
+  _applyDecision(nnDecision = null) {
     if (this.matchEnded) return;
     this.decisionsMade += 1;
 
-    // Tactical controller is now the primary decision maker. The neural net's
-    // action is still recorded by AgentBrain for gradient updates (advisory),
-    // but doesn't drive in-game behavior — the scripted policy + obstacle
-    // raycasts produce a usable bot today, while PPO + PBT keep evolving the
-    // value function on top of the same per-agent strategy params.
+    // Tactical controller is the high-level decision maker; the neural net is
+    // a learned advisor that gets blended in by `policy_blend_alpha` (PBT-
+    // mutated per-agent reward weight). At α=0 we get pure tactical (today's
+    // behaviour). At α=1 we get pure NN. Discrete actions (shoot/ability) get
+    // OR'd from the NN side rather than blended — tactical's shouldShoot is
+    // also LOS-gated so it stops shooting walls, while NN's shouldShoot can
+    // fire freely (intentional: lets the NN discover unusual tactics).
     const tactical = this.tacticalController.decide({
       enemy: this.closestEnemy ? this._getEnemyContext() : null,
       crystal: this.closestCrystal ? this._getCrystalContext() : null,
@@ -267,16 +269,42 @@ class SmartBot {
       distanceFromCenter: getArrayLength(this.positionArray),
       obstacleRays: this._lastObstacleRays,
     });
-    const decision = tactical.action;
+
+    const alpha = this._getPolicyBlendAlpha();
+    const decision = this._blendActions(tactical.action, nnDecision, alpha);
+
+    // LOS gate (TACTICAL side only): if the tactical controller wanted to
+    // shoot but our line of sight to the enemy is blocked by an obstacle,
+    // hold fire. This kills the wall-shooting bug. NN's shoot signal (mixed
+    // in via `decision.shouldShoot` above only when α>0 and NN agrees) is
+    // intentionally NOT gated — the NN can choose to learn LOS itself.
+    if (
+      tactical.action.shouldShoot &&
+      !(alpha > 0 && nnDecision?.shouldShoot) &&
+      this.closestEnemy &&
+      !this._hasLineOfSight(this.closestEnemy)
+    ) {
+      decision.shouldShoot = false;
+      this.tacticalReasons = [...tactical.reasons, "los_blocked"];
+      this.reporter?.incrementCounter("losVetoes");
+    } else {
+      this.tacticalReasons = tactical.reasons;
+    }
+
     this.tacticalOverrides += 1;
-    this.tacticalReasons = tactical.reasons;
     this.reporter?.incrementCounter("tacticalOverrides");
+    if (alpha > 0 && nnDecision) this.reporter?.incrementCounter("blendedDecisions");
 
     const input = this.inputBuffer[this.inputIndex];
     if (!input) return;
 
-    let moveX = decision.moveX;
-    let moveZ = decision.moveZ;
+    // Stuck-in-corner escape. If we've barely moved over the last 3 s we're
+    // probably wedged against geometry. Override the move vector with a
+    // randomised escape (back away + lateral) for a brief window.
+    const escape = this._maybeEscapeStuckCorner();
+
+    let moveX = escape ? escape.x : decision.moveX;
+    let moveZ = escape ? escape.z : decision.moveZ;
     const moveLen = Math.sqrt(moveX * moveX + moveZ * moveZ);
     if (moveLen > 0) {
       moveX /= moveLen;
@@ -321,6 +349,118 @@ class SmartBot {
       this._useAbility(decision.abilityHint);
       this.abilityTimer = rand(5, 15);
     }
+  }
+
+  /**
+   * Blend tactical and NN actions. Continuous outputs (move, aim) get a
+   * convex combination; discrete outputs (shoot, ability) keep tactical's
+   * decision as the floor and let the NN add to it when α > 0. Ability
+   * choice still comes from tactical (it knows what's contextually right).
+   */
+  _blendActions(tacticalAction, nnDecision, alpha) {
+    if (!nnDecision || alpha <= 0) {
+      return { ...tacticalAction };
+    }
+    const a = Math.max(0, Math.min(1, alpha));
+    return {
+      moveX: a * (Number(nnDecision.moveX) || 0) + (1 - a) * tacticalAction.moveX,
+      moveZ: a * (Number(nnDecision.moveZ) || 0) + (1 - a) * tacticalAction.moveZ,
+      aimOffsetX: a * (Number(nnDecision.aimOffsetX) || 0) + (1 - a) * tacticalAction.aimOffsetX,
+      aimOffsetZ: a * (Number(nnDecision.aimOffsetZ) || 0) + (1 - a) * tacticalAction.aimOffsetZ,
+      shouldShoot: tacticalAction.shouldShoot || !!nnDecision.shouldShoot,
+      shouldUseAbility: tacticalAction.shouldUseAbility || !!nnDecision.shouldUseAbility,
+      abilityHint: tacticalAction.abilityHint,
+    };
+  }
+
+  _getPolicyBlendAlpha() {
+    const fromBrain = this.brain?.getPolicyBlendAlpha?.();
+    if (Number.isFinite(fromBrain)) return Math.max(0, Math.min(1, fromBrain));
+    return 0.1;
+  }
+
+  /**
+   * Cast a ray from our position toward the enemy and check whether an
+   * obstacle blocks it before the enemy distance. Returns true iff we have
+   * a clear shot.
+   */
+  _hasLineOfSight(enemy) {
+    if (!this.gameState || typeof this.gameState.rayDistanceToObstacle !== "function") return true;
+    if (!enemy?.position) return true;
+    const dx = enemy.position.x - this.positionArray[0];
+    const dz = enemy.position.z - this.positionArray[2];
+    const distance = Math.hypot(dx, dz);
+    if (distance < 0.5) return true;
+    const dir = { x: dx / distance, z: dz / distance };
+    const origin = { x: this.positionArray[0], z: this.positionArray[2] };
+    // Slightly less than the actual enemy distance so the ray reports a hit
+    // only when an obstacle is genuinely between us — touching the enemy
+    // hitbox itself doesn't count.
+    const reachable = this.gameState.rayDistanceToObstacle(origin, dir, distance - 0.5);
+    return reachable >= distance - 0.5;
+  }
+
+  /**
+   * Detect when we've barely moved for ~3 s (probably wedged against a wall
+   * the avoidance heuristic can't escape) and produce a one-shot escape
+   * vector. We sample position every decision tick into a small ring buffer
+   * and pick a random direction biased AWAY from the geometry mass.
+   *
+   * Returns a {x, z} unit-ish vector when an escape is active, else null.
+   */
+  _maybeEscapeStuckCorner() {
+    const now = Date.now();
+    if (!this._stuckSamples) {
+      this._stuckSamples = [];
+      this._stuckEscapeUntil = 0;
+      this._stuckEscapeDir = null;
+    }
+    // Honor an active escape window before sampling — we don't want to keep
+    // re-detecting "stuck" while we're literally executing the escape.
+    if (now < this._stuckEscapeUntil && this._stuckEscapeDir) {
+      return this._stuckEscapeDir;
+    }
+    this._stuckSamples.push({
+      x: this.positionArray[0],
+      z: this.positionArray[2],
+      t: now,
+    });
+    while (this._stuckSamples.length && now - this._stuckSamples[0].t > 3000) {
+      this._stuckSamples.shift();
+    }
+    if (this._stuckSamples.length < 6) return null;
+    const oldest = this._stuckSamples[0];
+    const moved = Math.hypot(
+      this.positionArray[0] - oldest.x,
+      this.positionArray[2] - oldest.z
+    );
+    if (moved >= 1.0) return null; // moved enough; not stuck
+
+    // Pick the most-clear ray as escape direction so we don't push back into
+    // the wall we were stuck on. If we have no rays, just pick a random
+    // direction so something changes.
+    const rays = this._lastObstacleRays;
+    let dir = null;
+    if (Array.isArray(rays) && rays.length === 8) {
+      let bestIdx = 0;
+      let bestClearance = -1;
+      for (let i = 0; i < 8; i += 1) {
+        if (rays[i] > bestClearance) {
+          bestClearance = rays[i];
+          bestIdx = i;
+        }
+      }
+      const angle = (Math.PI * 2 * bestIdx) / 8;
+      dir = { x: Math.cos(angle), z: Math.sin(angle) };
+    } else {
+      const angle = Math.random() * Math.PI * 2;
+      dir = { x: Math.cos(angle), z: Math.sin(angle) };
+    }
+    this._stuckEscapeDir = dir;
+    this._stuckEscapeUntil = now + 1000; // commit to escape for 1 s
+    this._stuckSamples = []; // reset so the next stuck check waits a fresh 3 s
+    this.reporter?.incrementCounter("stuckEscapes");
+    return dir;
   }
 
   _shoot(targetPoint = null) {

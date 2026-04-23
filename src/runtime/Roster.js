@@ -30,14 +30,17 @@ function defaultLeagueRole(index) {
 // Visible name prefix sent in room:player:loaded.profile.userName.
 // Kept distinct from the internal agentId (which keys the model registry)
 // so we don't collide with other bot services using "agent_*" naming.
-const DISPLAY_NAME_PREFIX = process.env.BOT_DISPLAY_NAME_PREFIX || "ai_chainer";
+// "chnr" is short enough to fit within the chainer arena's 8-char display
+// limit even with two-digit indices (chnr_12).
+const DISPLAY_NAME_PREFIX = process.env.BOT_DISPLAY_NAME_PREFIX || "chnr";
 
 function defaultDisplayName(agentId, index) {
-  // If the agentId looks like our internal "agent_<n>" key, swap the prefix
-  // so the player-facing name is e.g. "ai_chainer_3" instead of "agent_3".
+  // 1-indexed display so the leaderboard reads chnr_1 .. chnr_12 instead of
+  // chnr_0 .. chnr_11 (matches the user's expectation). Internal agentId
+  // stays 0-indexed to keep model checkpoints stable across renames.
   const match = String(agentId || "").match(/^agent_(\d+)$/);
-  if (match) return `${DISPLAY_NAME_PREFIX}_${match[1]}`;
-  return agentId || `${DISPLAY_NAME_PREFIX}_${index}`;
+  if (match) return `${DISPLAY_NAME_PREFIX}_${parseInt(match[1], 10) + 1}`;
+  return agentId || `${DISPLAY_NAME_PREFIX}_${index + 1}`;
 }
 
 function normalizeAgent(agent, index, defaultAlias) {

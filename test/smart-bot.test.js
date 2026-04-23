@@ -101,3 +101,172 @@ test("smart bot crystal proxy: counts score gains outside combat window", () => 
   bot._sampleCrystalProxy();
   assert.equal(bot.getCrystalPickupsApprox(), 1, "score+100 during combat = NOT counted");
 });
+
+test("blend: alpha=0 returns pure tactical action (no NN influence)", () => {
+  const bot = makeBot();
+  const tactical = {
+    moveX: 1.0,
+    moveZ: 0.0,
+    aimOffsetX: 0.5,
+    aimOffsetZ: -0.5,
+    shouldShoot: true,
+    shouldUseAbility: false,
+    abilityHint: "rampage",
+  };
+  const nn = {
+    moveX: -1.0,
+    moveZ: 0.5,
+    aimOffsetX: 2.0,
+    aimOffsetZ: 2.0,
+    shouldShoot: false,
+    shouldUseAbility: true,
+  };
+  const blended = bot._blendActions(tactical, nn, 0);
+  // alpha=0 means pure tactical — NN should be entirely ignored.
+  assert.equal(blended.moveX, 1.0);
+  assert.equal(blended.moveZ, 0.0);
+  assert.equal(blended.aimOffsetX, 0.5);
+  assert.equal(blended.shouldShoot, true);
+  assert.equal(blended.shouldUseAbility, false);
+});
+
+test("blend: continuous outputs are convex combo, discrete outputs OR'd from NN", () => {
+  const bot = makeBot();
+  const tactical = {
+    moveX: 1.0,
+    moveZ: 0.0,
+    aimOffsetX: 0.0,
+    aimOffsetZ: 0.0,
+    shouldShoot: false,
+    shouldUseAbility: false,
+    abilityHint: "jump",
+  };
+  const nn = {
+    moveX: -1.0,
+    moveZ: 1.0,
+    aimOffsetX: 1.0,
+    aimOffsetZ: 1.0,
+    shouldShoot: true,
+    shouldUseAbility: true,
+  };
+  const blended = bot._blendActions(tactical, nn, 0.25);
+  // 25% NN, 75% tactical for continuous outputs.
+  assert.ok(Math.abs(blended.moveX - (0.25 * -1.0 + 0.75 * 1.0)) < 1e-6, `got moveX=${blended.moveX}`);
+  assert.ok(Math.abs(blended.moveZ - 0.25) < 1e-6);
+  assert.ok(Math.abs(blended.aimOffsetX - 0.25) < 1e-6);
+  // NN's shoot/ability go through (OR'd).
+  assert.equal(blended.shouldShoot, true);
+  assert.equal(blended.shouldUseAbility, true);
+  // Ability hint always tactical's choice.
+  assert.equal(blended.abilityHint, "jump");
+});
+
+test("LOS check: clear arena = always has line of sight", () => {
+  const bot = makeBot();
+  bot.gameState = { rayDistanceToObstacle: () => 100 }; // nothing blocks ray
+  bot.positionArray = [0, 0, 0];
+  const enemy = { position: { x: 10, y: 0, z: 0 } };
+  assert.equal(bot._hasLineOfSight(enemy), true);
+});
+
+test("LOS check: obstacle between us and enemy = blocked", () => {
+  const bot = makeBot();
+  // Wall between us and enemy: ray reaches only 5m before hitting an obstacle.
+  bot.gameState = { rayDistanceToObstacle: () => 5 };
+  bot.positionArray = [0, 0, 0];
+  const enemy = { position: { x: 15, y: 0, z: 0 } };
+  assert.equal(bot._hasLineOfSight(enemy), false);
+});
+
+test("LOS check: very close enemy always allowed (avoids edge-case denials)", () => {
+  const bot = makeBot();
+  bot.gameState = { rayDistanceToObstacle: () => 0 };
+  bot.positionArray = [0, 0, 0];
+  const enemy = { position: { x: 0.3, y: 0, z: 0 } }; // < 0.5m
+  assert.equal(bot._hasLineOfSight(enemy), true);
+});
+
+test("stuck escape: no escape when bot is moving normally", () => {
+  const bot = makeBot();
+  const t0 = Date.now();
+  // Simulate clean movement from (0,0,0) to (5,0,5) over 3 seconds.
+  for (let i = 0; i < 8; i += 1) {
+    bot.positionArray = [i * 0.7, 0, i * 0.7];
+    const escape = bot._maybeEscapeStuckCorner();
+    assert.equal(escape, null, `tick ${i} should not trigger escape`);
+  }
+  // After moving 3.5 m, no escape should be active.
+  assert.equal(bot._maybeEscapeStuckCorner(), null);
+  void t0;
+});
+
+test("stuck escape: triggers when bot has barely moved for >3s", () => {
+  const bot = makeBot();
+  const realNow = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  try {
+    bot._lastObstacleRays = [1, 1, 1, 1, 1, 1, 1, 1];
+    bot.positionArray = [10, 0, 10];
+    // Six samples 600ms apart = 3.0s span, which is exactly the threshold —
+    // capture each return so we can find the tick that fires escape.
+    let firedAt = -1;
+    let escape = null;
+    for (let i = 0; i < 8; i += 1) {
+      const result = bot._maybeEscapeStuckCorner();
+      if (result && firedAt === -1) {
+        firedAt = i;
+        escape = result;
+      }
+      now += 600;
+    }
+    assert.ok(escape, "escape vector should fire on one of the ticks");
+    assert.ok(firedAt >= 4 && firedAt <= 7, `escape should fire mid-window, got tick ${firedAt}`);
+    assert.ok(Math.hypot(escape.x, escape.z) > 0.5, "escape vector has magnitude");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("stuck escape: picks the most-clear ray as escape direction", () => {
+  const bot = makeBot();
+  const realNow = Date.now;
+  let now = 2_000_000;
+  Date.now = () => now;
+  try {
+    // North (ray 2) is the only fully clear direction; everything else blocked.
+    bot._lastObstacleRays = [0.05, 0.05, 1.0, 0.05, 0.05, 0.05, 0.05, 0.05];
+    bot.positionArray = [0, 0, 0];
+    let escape = null;
+    for (let i = 0; i < 10; i += 1) {
+      const result = bot._maybeEscapeStuckCorner();
+      if (result && !escape) escape = result;
+      now += 600;
+    }
+    assert.ok(escape, "escape should fire");
+    // Ray 2 is +Z (north): unit vector (0, 1).
+    assert.ok(Math.abs(escape.z - 1.0) < 0.1, `expected dirZ ~1, got ${escape.z}`);
+    assert.ok(Math.abs(escape.x) < 0.1, `expected dirX ~0, got ${escape.x}`);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("policy blend alpha: clamps out-of-range values from rewardConfig", () => {
+  const bot = makeBot();
+  // No brain wired = falls back to default 0.1.
+  assert.equal(bot._getPolicyBlendAlpha(), 0.1);
+
+  // Mock brain that returns various values.
+  bot.brain = { getPolicyBlendAlpha: () => 0.3 };
+  assert.equal(bot._getPolicyBlendAlpha(), 0.3);
+
+  bot.brain = { getPolicyBlendAlpha: () => 1.5 }; // out of range
+  assert.equal(bot._getPolicyBlendAlpha(), 1.0);
+
+  bot.brain = { getPolicyBlendAlpha: () => -0.4 };
+  assert.equal(bot._getPolicyBlendAlpha(), 0.0);
+
+  bot.brain = { getPolicyBlendAlpha: () => Number.NaN };
+  assert.equal(bot._getPolicyBlendAlpha(), 0.1, "NaN falls back to default");
+});

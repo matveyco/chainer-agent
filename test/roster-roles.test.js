@@ -32,13 +32,14 @@ test("default league role rotates through the pattern", () => {
   assert.equal(defaultLeagueRole(4), "main");
 });
 
-test("default displayName uses ai_chainer prefix to avoid agent_* collisions", () => {
+test("default displayName uses chnr_<1-indexed> prefix to fit the arena display limit", () => {
   const config = { rooms: { count: 1, agentsPerRoom: 4 } };
   const roster = buildDefaultRoster(config);
   const agents = flattenRosterAgents(roster);
+  const displayNames = agents.map((a) => a.displayName);
+  assert.deepEqual(displayNames, ["chnr_1", "chnr_2", "chnr_3", "chnr_4"]);
   for (const agent of agents) {
     assert.match(agent.agentId, /^agent_\d+$/, "internal id stays agent_*");
-    assert.match(agent.displayName, /^ai_chainer_\d+$/, `displayName should be ai_chainer_*, got ${agent.displayName}`);
   }
 });
 
