@@ -47,10 +47,14 @@ GAE_LAMBDA = 0.95
 CLIP_EPSILON = 0.2
 ENTROPY_COEF = 0.01
 VALUE_COEF = 0.5
-PPO_EPOCHS = 1  # Single-epoch PPO. Multi-epoch causes a cross-epoch in-place
-                # gradient race that crashes the gunicorn worker with SIGABRT/
-                # SIGSEGV every few hundred training steps. Sample efficiency
-                # drops slightly but trainer uptime jumps to indefinite.
+# PPO epochs per train step. Was hardcoded 1 to avoid a cross-epoch in-place
+# gradient race that crashed gunicorn with SIGABRT/SIGSEGV. The race was
+# THREAD-level (gunicorn workers interleaving on the same model); we fixed
+# that with PolicyFamily.train_lock so multi-epoch within a single locked
+# train step is now safe. Bumped to 2 to actually exercise the GPU
+# (otherwise ~50% of the work was a tensor.to(cuda) copy with negligible
+# compute on the other side). PPO_EPOCHS env var overrides for quick rollback.
+PPO_EPOCHS = int(os.environ.get("PPO_EPOCHS", "2"))
 MODEL_SCHEMA_VERSION = 4  # bumped from 3 when STATE_DIM grew 24 -> 32 (obstacle raycasts)
 LOG_STD_MIN = -5.0
 LOG_STD_MAX = 2.0
@@ -82,22 +86,27 @@ else:
 # exploit/explore mutates over time. Triggered by /pbt/step from the
 # supervisor on a schedule.
 REWARD_WEIGHT_DEFAULTS = {
-    "scoreDeltaWeight": 0.05,
-    "killBonus": 1.0,
-    "deathPenalty": -0.75,
-    "damageWeight": 0.004,
-    "damageTakenPenalty": -0.002,
-    "survivalWeight": 0.01,
-    "abilityValueWeight": 0.08,
-    "accuracyWeight": 0.05,
-    "antiSuicidePenalty": -0.3,
-    "matchRankBonus": 25.0,
-    # Hybrid policy blend: how much the NN's action influences the bot's
-    # behaviour vs the scripted tactical controller. 0 = pure tactical,
-    # 1 = pure NN. Default 0.1 so the NN starts mattering for behaviour
-    # (and therefore its gradients become credible) without regressing the
-    # polished scripted play. PBT mutates this per agent: if NN actually
-    # helps, the alpha drifts up for top performers over generations.
+    # --- Per-step rewards (computed every decision tick) ---
+    "scoreDeltaWeight": 0.05,           # +1 / +20 score in the last tick
+    "killBonus": 1.0,                   # +1 per kill on this tick
+    "deathPenalty": -0.75,              # -1 per death on this tick
+    "damageWeight": 0.004,              # +1 / +250 damage dealt
+    "damageTakenPenalty": -0.002,       # -1 / -500 damage taken
+    "survivalWeight": 0.01,             # +0.01 per second alive
+    "abilityValueWeight": 0.08,         # +1 per ability use
+    "accuracyWeight": 0.05,             # +1 × shotAccuracy (0..1)
+    "antiSuicidePenalty": -0.3,         # -1 if died without a kill
+    # --- New fine-grained per-step shaping (added 2026-04-24) ---
+    "crystalPickupBonus": 0.5,          # +1 per crystal pickup (proxy: score gain w/o combat)
+    "streakBonus": 0.3,                 # +1 × current kill streak on every kill
+    "firstBloodBonus": 3.0,             # +1 once per match — first kill of the match
+    "outnumberedSurvivalBonus": 0.05,  # +1 per second alive while >=3 enemies in close range
+    "wallShotPenalty": -0.1,            # -1 per LOS-vetoed shot (tactical tried, gate caught it)
+    # --- Terminal rewards (only on done=true with rank info) ---
+    "matchRankBonus": 25.0,             # rank-fraction bonus, see _computeRankReward
+    "winBonus": 50.0,                   # +1 ONLY on rank=1 — winning is the thing that matters
+    "lastPlacePenalty": -20.0,          # +1 on rank=roomSize — losing badly stings
+    # --- Hybrid policy blend genome ---
     "policyBlendAlpha": 0.1,
 }
 # Bounds keep mutated weights in a sensible range so the PBT explore step
@@ -112,7 +121,14 @@ REWARD_WEIGHT_BOUNDS = {
     "abilityValueWeight": (0.0, 1.0),
     "accuracyWeight": (0.0, 5.0),
     "antiSuicidePenalty": (-3.0, 0.0),
+    "crystalPickupBonus": (0.0, 5.0),
+    "streakBonus": (0.0, 2.0),
+    "firstBloodBonus": (0.0, 20.0),
+    "outnumberedSurvivalBonus": (0.0, 1.0),
+    "wallShotPenalty": (-1.0, 0.0),
     "matchRankBonus": (1.0, 200.0),
+    "winBonus": (0.0, 200.0),
+    "lastPlacePenalty": (-100.0, 0.0),
     "policyBlendAlpha": (0.0, 1.0),
 }
 PBT_LOG = LOGS_DIR / "pbt.jsonl"

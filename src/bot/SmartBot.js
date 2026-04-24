@@ -110,8 +110,17 @@ class SmartBot {
     // deal, that's most likely a crystal pickup. Kept per match.
     this._lastScoreSeen = 0;
     this._crystalPickupsApprox = 0;
+    // Per-step crystal delta for the reward signal (consumed once per
+    // recordStep, then reset).
+    this._crystalDeltaSinceLastStep = 0;
     // Cached cluster direction (refreshed on each decision tick).
     this._lastEnemyClusterDir = null;
+    // Streak / first-blood tracking — used by the new shaping rewards.
+    this._currentKillStreak = 0;
+    this._matchHasFirstBlood = false; // true after this bot's first kill of the match
+    // Wall-shot counter (LOS-vetoed shoot intents). Bumped by _applyDecision
+    // on every veto, drained per recordStep.
+    this._wallShotsSinceLastStep = 0;
   }
 
   async initBrain(trainerUrl) {
@@ -208,6 +217,24 @@ class SmartBot {
           this.decisionInFlight = false;
         });
 
+      // Maintain kill streak + first-blood signals for the new reward shaping.
+      // Streak resets on death; first-blood fires once per match per agent.
+      let gotFirstBloodNow = false;
+      if (this._lastGotKill) {
+        this._currentKillStreak += 1;
+        if (!this._matchHasFirstBlood) {
+          gotFirstBloodNow = true;
+          this._matchHasFirstBlood = true;
+        }
+      }
+      if (this._lastDied) this._currentKillStreak = 0;
+
+      // Drain crystal-delta and wall-shot counters into this step's reward.
+      const crystalDelta = this._crystalDeltaSinceLastStep;
+      const wallShotsRecent = this._wallShotsSinceLastStep;
+      this._crystalDeltaSinceLastStep = 0;
+      this._wallShotsSinceLastStep = 0;
+
       this.brain.recordStep({
         currentScore: this.data.score || 0,
         kills: this.data.kills || 0,
@@ -220,6 +247,12 @@ class SmartBot {
         abilityUsed: this.lastAbilityUsed,
         shotAccuracy: this.fitness.getAccuracy(),
         done: false,
+        // New per-step shaping signals:
+        crystalDelta,
+        currentStreak: this._currentKillStreak,
+        gotFirstBlood: gotFirstBloodNow,
+        nearbyEnemyCount: this._lastNearbyEnemyCount || 0,
+        wallShotsRecent,
       });
 
       if (this._lastDamageDealt > 0 || this._lastDamageTaken > 0 || this._lastGotKill || this._lastDied) {
@@ -299,6 +332,9 @@ class SmartBot {
       decision.shouldShoot = false;
       this.tacticalReasons = [...tactical.reasons, "los_blocked"];
       this.reporter?.incrementCounter("losVetoes");
+      // Wall-shot signal for the reward function: every veto is a tactical
+      // controller mistake we want to discourage. Drained per recordStep.
+      this._wallShotsSinceLastStep += 1;
     } else {
       this.tacticalReasons = tactical.reasons;
     }
@@ -771,6 +807,7 @@ class SmartBot {
     const recentlyHit = Date.now() - this.lastCombatAt < 1500;
     if (!recentlyHit && delta > 0) {
       this._crystalPickupsApprox += 1;
+      this._crystalDeltaSinceLastStep += 1;
       this.reporter?.incrementCounter("crystalPickupsApprox");
     }
   }
@@ -778,6 +815,10 @@ class SmartBot {
   resetMatchStats() {
     this._enemyTracks.clear();
     this._lastEnemyClusterDir = null;
+    this._currentKillStreak = 0;
+    this._matchHasFirstBlood = false;
+    this._crystalDeltaSinceLastStep = 0;
+    this._wallShotsSinceLastStep = 0;
     this._lastScoreSeen = 0;
     this._crystalPickupsApprox = 0;
   }

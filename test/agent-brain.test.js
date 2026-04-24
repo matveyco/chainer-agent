@@ -47,6 +47,100 @@ test("agent brain resetMatch clears episode reward totals", () => {
   assert.deepEqual(brain.episodeRewardTotals, {});
 });
 
+test("agent brain crystalPickup reward fires per crystal delta", () => {
+  const brain = new AgentBrain("agent_test", "http://localhost:5555", {
+    rewardConfig: { crystalPickupBonus: 0.5 },
+  });
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+  brain.recordStep({ done: false, crystalDelta: 3, survivalSeconds: 0.05 });
+  assert.equal(brain.experienceBuffer[0].reward_components.crystalPickup, 1.5);
+});
+
+test("agent brain firstBlood fires once per match", () => {
+  const brain = new AgentBrain("agent_test", "http://localhost:5555", {
+    rewardConfig: { firstBloodBonus: 3.0, killBonus: 1.0, streakBonus: 0.3 },
+  });
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+  brain.recordStep({ done: false, gotKill: true, gotFirstBlood: true, currentStreak: 1 });
+  assert.equal(brain.experienceBuffer[0].reward_components.firstBlood, 3.0);
+  assert.equal(brain.experienceBuffer[0].reward_components.streak, 0.3);
+});
+
+test("agent brain streak reward scales with current streak length", () => {
+  const brain = new AgentBrain("agent_test", "http://localhost:5555", {
+    rewardConfig: { streakBonus: 0.3 },
+  });
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+  brain.recordStep({ done: false, gotKill: true, currentStreak: 5 });
+  assert.equal(brain.experienceBuffer[0].reward_components.streak, 1.5); // 5 * 0.3
+});
+
+test("agent brain outnumberedSurvival fires when alive with 3+ enemies in close range", () => {
+  const brain = new AgentBrain("agent_test", "http://localhost:5555", {
+    rewardConfig: { outnumberedSurvivalBonus: 0.05, survivalWeight: 0 },
+  });
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+  brain.recordStep({ done: false, survivalSeconds: 2, nearbyEnemyCount: 4, died: false });
+  assert.ok(Math.abs(brain.experienceBuffer[0].reward_components.outnumberedSurvival - 0.1) < 1e-6);
+
+  // Now with only 2 nearby enemies — bonus should NOT fire.
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+  brain.recordStep({ done: false, survivalSeconds: 2, nearbyEnemyCount: 2, died: false });
+  assert.equal(brain.experienceBuffer[1].reward_components.outnumberedSurvival, 0);
+});
+
+test("agent brain wallShot penalty fires per LOS-vetoed shot", () => {
+  const brain = new AgentBrain("agent_test", "http://localhost:5555", {
+    rewardConfig: { wallShotPenalty: -0.1 },
+  });
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+  brain.recordStep({ done: false, wallShotsRecent: 4 });
+  assert.ok(Math.abs(brain.experienceBuffer[0].reward_components.wallShot + 0.4) < 1e-6);
+});
+
+test("agent brain win bonus fires only on rank=1 terminal step", () => {
+  const brain = new AgentBrain("agent_test", "http://localhost:5555", {
+    rewardConfig: { winBonus: 50.0, matchRankBonus: 25.0, lastPlacePenalty: -20.0 },
+  });
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+
+  // Winner: gets winBonus.
+  brain.recordStep({ done: true, rank: 1, roomSize: 12 });
+  assert.equal(brain.experienceBuffer[0].reward_components.win, 50.0);
+  assert.equal(brain.experienceBuffer[0].reward_components.lastPlace, 0);
+
+  // Mid-pack: no winBonus, no lastPlacePenalty.
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+  brain.recordStep({ done: true, rank: 6, roomSize: 12 });
+  assert.equal(brain.experienceBuffer[1].reward_components.win, 0);
+  assert.equal(brain.experienceBuffer[1].reward_components.lastPlace, 0);
+
+  // Last place: no winBonus, gets lastPlacePenalty.
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+  brain.recordStep({ done: true, rank: 12, roomSize: 12 });
+  assert.equal(brain.experienceBuffer[2].reward_components.win, 0);
+  assert.equal(brain.experienceBuffer[2].reward_components.lastPlace, -20.0);
+});
+
+test("agent brain getEpisodeRewardTotals returns rounded shallow snapshot", () => {
+  const brain = new AgentBrain("agent_test", "http://localhost:5555");
+  brain.episodeRewardTotals = { kills: 1.123456, scoreDelta: 0.0001, win: 50 };
+  const snap = brain.getEpisodeRewardTotals();
+  assert.deepEqual(snap, { kills: 1.123, scoreDelta: 0, win: 50 });
+  // Mutating the snapshot must not affect the brain's state.
+  snap.kills = 999;
+  assert.equal(brain.episodeRewardTotals.kills, 1.123456);
+});
+
 test("agent brain emits matchRank reward only on terminal step with rank info", () => {
   const brain = new AgentBrain("agent_rank", "http://localhost:5555", {
     rewardConfig: { matchRankBonus: 1.0 },

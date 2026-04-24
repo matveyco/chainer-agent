@@ -6,6 +6,7 @@ const {
   aggregatePerArchetype,
   summarizeLLM,
   renderMarkdown,
+  lastMatchRewardBreakdown,
 } = require("../scripts/daily_report");
 
 test("aggregatePerAgent sums score, kills, deaths and computes win rate / K-D", () => {
@@ -75,6 +76,58 @@ test("summarizeLLM detects strategy drift vs archetype defaults", () => {
   assert.equal(sniper.avgStrategyDrift, 0, "sniper at archetype defaults shows no drift");
   assert.equal(hunter.lastPlan, "Hunt aggressively");
   assert.equal(sniper.lastPlan, null);
+});
+
+test("lastMatchRewardBreakdown picks the last match's per-agent reward signals", () => {
+  const matches = [
+    {
+      finishedAt: "2026-04-24T10:00:00Z",
+      agentResults: [
+        {
+          agentId: "agent_0",
+          displayName: "chnr_1",
+          archetypeId: "hunter",
+          rank: 1,
+          score: 5000,
+          rewardTotals: { kills: 12, win: 50, scoreDelta: 2.5, deaths: -3.0 },
+        },
+        {
+          agentId: "agent_1",
+          displayName: "chnr_2",
+          archetypeId: "collector",
+          rank: 4,
+          score: 2200,
+          rewardTotals: { crystalPickup: 8.5, scoreDelta: 1.2, kills: 1.0 },
+        },
+        {
+          agentId: "agent_2",
+          displayName: "chnr_3",
+          archetypeId: "berserker",
+          rank: 12,
+          score: 100,
+          rewardTotals: { lastPlace: -20, deaths: -7.5, kills: 4 },
+        },
+      ],
+    },
+  ];
+  const breakdown = lastMatchRewardBreakdown(matches);
+  assert.ok(breakdown);
+  assert.equal(breakdown.finishedAt, "2026-04-24T10:00:00Z");
+  // Sorted by rank.
+  assert.equal(breakdown.rows[0].rank, 1);
+  assert.equal(breakdown.rows[2].rank, 12);
+  // Top signals — sorted by absolute contribution.
+  assert.match(breakdown.rows[0].topSignals, /win=50/, "winner has win=50 in top signals");
+  assert.match(breakdown.rows[1].topSignals, /crystalPickup=8\.5/, "collector's signal is crystalPickup");
+  assert.match(breakdown.rows[2].topSignals, /lastPlace=-20/, "last-place stings");
+});
+
+test("lastMatchRewardBreakdown returns null when no matches have rewardTotals", () => {
+  assert.equal(lastMatchRewardBreakdown([]), null);
+  assert.equal(
+    lastMatchRewardBreakdown([{ finishedAt: "x", agentResults: [{ agentId: "a", score: 100 }] }]),
+    null
+  );
 });
 
 test("renderMarkdown produces a non-empty markdown report", () => {

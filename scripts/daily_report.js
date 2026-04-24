@@ -227,6 +227,42 @@ function summarizeLLM(profiles) {
   return rows.sort((a, b) => b.avgStrategyDrift - a.avgStrategyDrift);
 }
 
+/**
+ * Per-component reward breakdown for the most recent match. Tells us *why*
+ * each agent earned what they earned — was it kills (high killBonus
+ * total)? Crystals? Survival? Anti-suicide penalty wiping the slate?
+ * Returns null if the match summary doesn't have rewardTotals yet (data
+ * predates the schema change).
+ */
+function lastMatchRewardBreakdown(matches) {
+  if (!matches.length) return null;
+  const last = matches[matches.length - 1];
+  const rows = [];
+  for (const a of last.agentResults || []) {
+    if (!a.rewardTotals || typeof a.rewardTotals !== "object") continue;
+    // Sort components by absolute contribution so the dominant signals are
+    // obvious at a glance.
+    const sorted = Object.entries(a.rewardTotals)
+      .map(([k, v]) => [k, Number(v) || 0])
+      .sort((p, q) => Math.abs(q[1]) - Math.abs(p[1]));
+    const top3 = sorted.slice(0, 3).map(([k, v]) => `${k}=${v.toFixed(1)}`).join(", ");
+    const total = sorted.reduce((sum, [, v]) => sum + v, 0);
+    rows.push({
+      bot: a.displayName || a.agentId,
+      archetype: a.archetypeId,
+      rank: a.rank,
+      score: a.score,
+      total: +total.toFixed(1),
+      topSignals: top3,
+    });
+  }
+  if (!rows.length) return null;
+  return {
+    finishedAt: last.finishedAt,
+    rows: rows.sort((a, b) => (a.rank || 999) - (b.rank || 999)),
+  };
+}
+
 function summarizePbt(events, hoursBack) {
   const cutoff = Date.now() / 1000 - hoursBack * 3600;
   const recent = events.filter((e) => (e.timestamp || 0) >= cutoff);
@@ -330,6 +366,22 @@ function renderMarkdown(report) {
     ])
   );
 
+  if (report.rewardBreakdown) {
+    lines.push(`## Reward Breakdown — Last Match`);
+    lines.push(`Match ended ${report.rewardBreakdown.finishedAt}. Top 3 reward signals per agent (sorted by |contribution|):`);
+    lines.push(``);
+    lines.push(
+      fmtTable(report.rewardBreakdown.rows, [
+        { key: "bot", label: "Bot" },
+        { key: "archetype", label: "Archetype" },
+        { key: "rank", label: "Rank" },
+        { key: "score", label: "Score", format: "num" },
+        { key: "total", label: "Reward Total", format: "num" },
+        { key: "topSignals", label: "Top Signals" },
+      ])
+    );
+  }
+
   lines.push(`## PBT Cycles (genetic algorithm)`);
   if (!report.pbtCycles.length) {
     lines.push(`_No PBT cycles in the last ${report.hours}h._`);
@@ -392,6 +444,7 @@ async function buildReport({ hours }) {
   const llmRows = summarizeLLM(profiles);
   const pbtCycles = summarizePbt(pbtEvents, hours);
   const counters = parsePromMetrics(metricsText);
+  const rewardBreakdown = lastMatchRewardBreakdown(matches);
 
   let trainerState = null;
   if (familyStatus) {
@@ -421,6 +474,7 @@ async function buildReport({ hours }) {
     pbtCycles,
     counters,
     trainerState,
+    rewardBreakdown,
   };
 }
 
@@ -453,4 +507,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { buildReport, renderMarkdown, aggregatePerAgent, aggregatePerArchetype, summarizeLLM };
+module.exports = {
+  buildReport,
+  renderMarkdown,
+  aggregatePerAgent,
+  aggregatePerArchetype,
+  summarizeLLM,
+  lastMatchRewardBreakdown,
+};

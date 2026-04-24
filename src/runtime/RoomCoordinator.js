@@ -975,6 +975,13 @@ class RoomCoordinator {
           done: true,
           rank,
           roomSize,
+          // Final-step shaping signals: drain anything still pending so the
+          // last reward components reflect the closing seconds of the match.
+          crystalDelta: session.bot._crystalDeltaSinceLastStep || 0,
+          currentStreak: session.bot._currentKillStreak || 0,
+          gotFirstBlood: false, // first-blood is per-step only, not on done
+          nearbyEnemyCount: session.bot._lastNearbyEnemyCount || 0,
+          wallShotsRecent: session.bot._wallShotsSinceLastStep || 0,
         });
         await session.bot.brain.flush();
         await session.bot.brain.reportEpisode({ ...summary, rank, roomSize });
@@ -1082,6 +1089,12 @@ class RoomCoordinator {
       crystalsCollectedApprox: typeof session.bot.getCrystalPickupsApprox === "function"
         ? session.bot.getCrystalPickupsApprox()
         : 0,
+      // Per-component reward breakdown for this match. Lets the daily report
+      // and the LLM coach see *which* reward signals drove this agent's
+      // training (killBonus dominated vs crystalPickup vs survival, etc.).
+      rewardTotals: session.bot.brain && typeof session.bot.brain.getEpisodeRewardTotals === "function"
+        ? session.bot.brain.getEpisodeRewardTotals()
+        : null,
     };
   }
 

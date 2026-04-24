@@ -73,6 +73,21 @@ class AgentBrain {
     return Math.max(0, Math.min(1, raw));
   }
 
+  /**
+   * Snapshot of which reward components drove this match. Used by the
+   * match analysis layer to break down "agent X scored well because their
+   * killBonus dominated; agent Y scored well via crystalPickup". Each
+   * value is the sum of that component's rewards across every transition
+   * in the current episode.
+   */
+  getEpisodeRewardTotals() {
+    const out = {};
+    for (const [k, v] of Object.entries(this.episodeRewardTotals)) {
+      out[k] = +Number(v).toFixed(3);
+    }
+    return out;
+  }
+
   async init() {
     // Fetch agent-specific reward weights first so any subsequent recordStep
     // calls use the per-agent genome instead of the global defaults.
@@ -133,6 +148,9 @@ class AgentBrain {
     const scoreDelta = transition.currentScore - this.lastScore;
     const killDelta = Math.max(0, transition.kills - this.lastKills);
     const deathDelta = Math.max(0, transition.deaths - this.lastDeaths);
+    const isWin = transition.done && transition.rank === 1 && transition.roomSize > 0;
+    const isLastPlace = transition.done && transition.rank === transition.roomSize && transition.roomSize > 1;
+    const outnumberedAlive = (transition.nearbyEnemyCount || 0) >= 3 && !transition.died;
 
     const rewardComponents = {
       scoreDelta: scoreDelta * (this.rewardConfig.scoreDeltaWeight ?? 0.02),
@@ -144,13 +162,37 @@ class AgentBrain {
       ability: transition.abilityUsed ? (this.rewardConfig.abilityValueWeight ?? 0.08) : 0,
       accuracy: transition.shotAccuracy * (this.rewardConfig.accuracyWeight ?? 0.2),
       antiSuicide: transition.died && !transition.gotKill ? (this.rewardConfig.antiSuicidePenalty ?? -0.3) : 0,
-      // Terminal match-rank bonus (only on done=true, when rank info is present).
-      // Rewards #1 finish, penalises last finish; tunable via reward.matchRankBonus.
+      // --- New fine-grained shaping (added 2026-04-24) ---
+      // Crystals: SmartBot detects pickups via "score gained without combat in
+      // last 1.5s" and forwards the count delta. One bonus per pickup.
+      crystalPickup: (transition.crystalDelta || 0) * (this.rewardConfig.crystalPickupBonus ?? 0.5),
+      // Streak: each kill is worth more if it extends a kill streak (no death
+      // since the last kill). currentStreak is supplied by SmartBot which
+      // resets it on death.
+      streak: transition.gotKill
+        ? (transition.currentStreak || 1) * (this.rewardConfig.streakBonus ?? 0.3)
+        : 0,
+      // First blood: only fires once per match per agent (SmartBot tracks).
+      firstBlood: transition.gotFirstBlood ? (this.rewardConfig.firstBloodBonus ?? 3.0) : 0,
+      // Outnumbered survival: per second alive while >=3 enemies are in close
+      // range. Encourages competent defensive play, not just hiding.
+      outnumberedSurvival: outnumberedAlive
+        ? transition.survivalSeconds * (this.rewardConfig.outnumberedSurvivalBonus ?? 0.05)
+        : 0,
+      // Wall shots: SmartBot increments wallShotsRecent each LOS-veto event.
+      // Small negative — discourages firing at things you can't hit.
+      wallShot: (transition.wallShotsRecent || 0) * (this.rewardConfig.wallShotPenalty ?? -0.1),
+      // --- Terminal rewards (only on done=true with rank info) ---
       matchRank:
         transition.done && transition.rank > 0 && transition.roomSize > 0
           ? this._computeRankReward(transition.rank, transition.roomSize) *
             (this.rewardConfig.matchRankBonus ?? 1.0)
           : 0,
+      // Explicit win signal — separate from matchRankBonus so it can be tuned
+      // independently. The whole point of the game is to win the round.
+      win: isWin ? (this.rewardConfig.winBonus ?? 50.0) : 0,
+      // Last-place penalty — finishing dead last is much worse than mid-pack.
+      lastPlace: isLastPlace ? (this.rewardConfig.lastPlacePenalty ?? -20.0) : 0,
     };
 
     const reward = Object.values(rewardComponents).reduce((sum, value) => sum + value, 0);
@@ -340,6 +382,12 @@ class AgentBrain {
         done: !!args[0].done,
         rank: args[0].rank || 0,
         roomSize: args[0].roomSize || 0,
+        // Newer per-step shaping signals; missing fields are safe (treated as 0).
+        crystalDelta: args[0].crystalDelta || 0,
+        currentStreak: args[0].currentStreak || 0,
+        gotFirstBlood: !!args[0].gotFirstBlood,
+        nearbyEnemyCount: args[0].nearbyEnemyCount || 0,
+        wallShotsRecent: args[0].wallShotsRecent || 0,
       };
     }
 
