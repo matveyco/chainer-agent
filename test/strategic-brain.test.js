@@ -132,6 +132,8 @@ test("strategic brain sends format:'json' to enforce JSON-only output", async (t
 
 test("strategic brain default models point to the new fast variants", () => {
   const brain = new StrategicBrain("agent_10", "fake-key");
-  assert.equal(brain.model, "kimi-k2.6:cloud");
-  assert.equal(brain.fallbackModel, "deepseek-v4-flash:cloud");
+  // No :cloud suffix — Ollama probe showed the suffix triggers a slower
+  // routing path (60s vs 4s for the same prompt).
+  assert.equal(brain.model, "kimi-k2.6");
+  assert.equal(brain.fallbackModel, "deepseek-v4-flash");
 });

@@ -1,0 +1,9 @@
+[Unit]
+Description=Chainer Agent — Log Maintenance (truncate big logs in place)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/chainer-agent
+ExecStart=/bin/bash %h/chainer-agent/scripts/log_maintenance.sh
+StandardOutput=append:%h/chainer-agent/log_maintenance.log
+StandardError=append:%h/chainer-agent/log_maintenance.log

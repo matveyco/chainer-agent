@@ -9,14 +9,17 @@ const logger = require("../utils/logger");
 const { getDefaultArchetype } = require("./archetypes");
 
 const OLLAMA_API = "https://api.ollama.com/api/chat";
-// Primary: kimi-k2.6 is roughly half the parameter count of k2.5 (~595B vs
-// 1.1T) so it answers our small structured prompts much faster. We were
-// hitting 48% timeout rate on k2.5 at the 90s ceiling.
-const DEFAULT_MODEL = "kimi-k2.6:cloud";
+// Primary: kimi-k2.6 (NO :cloud suffix). Direct probe vs Ollama Cloud
+// catalog showed:
+//   kimi-k2.6:cloud         -> ~60s for trivial prompt (slow path)
+//   kimi-k2.6 (no suffix)   -> ~4s for the same prompt (fast path)
+//   deepseek-v4-flash       -> ~1.2s
+// The :cloud suffix triggers some slower routing on Ollama's side; without
+// it we hit the latency-optimised endpoint. ~595B params, half k2.5's size.
+const DEFAULT_MODEL = "kimi-k2.6";
 // Fallback: deepseek-v4-flash is the latency-optimised variant (~140B);
-// used as a one-shot retry when the primary times out or 5xx's. If both
-// fail we accept the round and rely on PBT as the diversity engine.
-const DEFAULT_FALLBACK_MODEL = "deepseek-v4-flash:cloud";
+// used as a one-shot retry when the primary times out or 5xx's. ~1s avg.
+const DEFAULT_FALLBACK_MODEL = "deepseek-v4-flash";
 
 class StrategicBrain {
   constructor(agentId, apiKey, model = DEFAULT_MODEL, options = {}) {

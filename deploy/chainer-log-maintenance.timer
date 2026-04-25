@@ -1,0 +1,12 @@
+[Unit]
+Description=Chainer Agent — Log Maintenance (timer)
+
+[Timer]
+# Runs every 6 hours. Persistent=true catches missed runs across reboots.
+OnCalendar=*-*-* 00,06,12,18:30:00
+Persistent=true
+RandomizedDelaySec=120
+Unit=chainer-log-maintenance.service
+
+[Install]
+WantedBy=timers.target
