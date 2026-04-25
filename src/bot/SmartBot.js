@@ -37,12 +37,13 @@ class SmartBot {
       this.strategicBrain = new StrategicBrain(
         this.agentId,
         config.ollamaApiKey,
-        config.ollamaModel || "kimi-k2.5:cloud",
+        config.ollamaModel || undefined,
         {
           archetypeId: this.archetypeId,
           trainerUrl: config.trainerUrl,
           reporter: options.reporter || null,
-          timeoutMs: config.runtime?.strategyCoachTimeoutMs || 3000,
+          timeoutMs: config.runtime?.strategyCoachTimeoutMs || 90000,
+          fallbackModel: config.ollamaFallbackModel || undefined,
         }
       );
     }

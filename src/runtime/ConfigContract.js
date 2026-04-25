@@ -61,6 +61,10 @@ function applyEnvOverrides(config, env = process.env) {
   if (env.OAUTH_API_KEY) next.server.authKey = env.OAUTH_API_KEY;
   if (env.OLLAMA_CLOUD_API_KEY) next.ollamaApiKey = env.OLLAMA_CLOUD_API_KEY;
   if (env.DEEP_ANALYSIS_MODEL) next.ollamaModel = env.DEEP_ANALYSIS_MODEL;
+  // Optional fallback the StrategicBrain falls back to on a retryable
+  // primary failure (timeout / 5xx / 429). Defaults to deepseek-v4-flash
+  // baked into StrategicBrain.js if neither env var is set.
+  if (env.LLM_FALLBACK_MODEL) next.ollamaFallbackModel = env.LLM_FALLBACK_MODEL;
   return next;
 }
 

@@ -9,13 +9,21 @@ const logger = require("../utils/logger");
 const { getDefaultArchetype } = require("./archetypes");
 
 const OLLAMA_API = "https://api.ollama.com/api/chat";
-const DEFAULT_MODEL = "kimi-k2.5:cloud";
+// Primary: kimi-k2.6 is roughly half the parameter count of k2.5 (~595B vs
+// 1.1T) so it answers our small structured prompts much faster. We were
+// hitting 48% timeout rate on k2.5 at the 90s ceiling.
+const DEFAULT_MODEL = "kimi-k2.6:cloud";
+// Fallback: deepseek-v4-flash is the latency-optimised variant (~140B);
+// used as a one-shot retry when the primary times out or 5xx's. If both
+// fail we accept the round and rely on PBT as the diversity engine.
+const DEFAULT_FALLBACK_MODEL = "deepseek-v4-flash:cloud";
 
 class StrategicBrain {
   constructor(agentId, apiKey, model = DEFAULT_MODEL, options = {}) {
     this.agentId = agentId;
     this.apiKey = apiKey;
     this.model = model;
+    this.fallbackModel = options.fallbackModel || DEFAULT_FALLBACK_MODEL;
     this.trainerUrl = options.trainerUrl || null;
     this.reporter = options.reporter || null;
     this.timeoutMs = Math.max(500, Number(options.timeoutMs || 3000));
@@ -185,44 +193,21 @@ class StrategicBrain {
     const avgKD = this.totalKills / Math.max(this.totalDeaths, 1);
     const recent = this.matchHistory.slice(-5);
 
-    return `You are "${this.agentId}", a combat AI in a multiplayer arena shooter.
+    // Tight, structured prompt. Output cap is ~200 chars per text field so
+    // fast inference completes within the timeout. The "format: json" arg
+    // we pass to Ollama enforces JSON-only output server-side too.
+    return `You coach "${this.agentId}" (${this.personality.archetype}) in an arena shooter.
 
-Return only valid JSON matching this schema:
-{
-  "analysis": "one sentence",
-  "plan": "one sentence",
-  "strategy": {
-    "aggression": 0.0,
-    "accuracy_focus": 0.0,
-    "crystal_priority": 0.0,
-    "ability_usage": 0.0,
-    "retreat_threshold": 0.0
-  }
-}
+Output JSON ONLY, no prose, this schema:
+{"analysis":"<= 200 chars, what just happened","plan":"<= 200 chars, next match plan","strategy":{"aggression":0..1,"accuracy_focus":0..1,"crystal_priority":0..1,"ability_usage":0..1,"retreat_threshold":0..1}}
 
-Constraints:
-- Every strategy value must be a number between 0 and 1.
-- Stay in character as ${this.personality.archetype}.
-- Optimize for winning score, efficient fights, and objective collection.
+Stay in character: ${this.personality.traits}
+Optimize for: winning the round, surviving fights, collecting crystals.
 
-Personality:
-${this.personality.traits}
-
-Current strategy:
-${JSON.stringify(this.strategy)}
-
-Lifetime:
-matches=${this.matchesPlayed}
-kills=${this.totalKills}
-deaths=${this.totalDeaths}
-avg_kd=${avgKD.toFixed(2)}
-avg_score=${avgScore.toFixed(1)}
-
-Recent matches:
-${recent.map((m) => JSON.stringify(m)).join("\n")}
-
-Last match:
-${JSON.stringify(lastMatch)}`;
+Current: ${JSON.stringify(this.strategy)}
+Lifetime: matches=${this.matchesPlayed} k=${this.totalKills} d=${this.totalDeaths} kd=${avgKD.toFixed(2)} avg_score=${avgScore.toFixed(0)}
+Recent matches: ${recent.map((m) => JSON.stringify(m)).join("|")}
+Last: ${JSON.stringify(lastMatch)}`;
   }
 
   _parseStrategy(text) {
@@ -262,6 +247,35 @@ ${JSON.stringify(lastMatch)}`;
   }
 
   async _callLLM(prompt) {
+    // Try primary, then optional fallback once, then give up. Each attempt
+    // gets its own AbortController so a slow primary doesn't eat the
+    // fallback's timeout budget.
+    try {
+      return await this._callLLMOnce(this.model, prompt);
+    } catch (primaryErr) {
+      const isRetryable = primaryErr.retryable === true;
+      const haveFallback = !!this.fallbackModel && this.fallbackModel !== this.model;
+      if (!isRetryable || !haveFallback) throw primaryErr;
+      this.reporter?.incrementCounter("llmRetries");
+      try {
+        return await this._callLLMOnce(this.fallbackModel, prompt);
+      } catch (fallbackErr) {
+        // Surface the original (primary) error message + the fact that fallback
+        // also failed so the failure log is actionable.
+        const composite = new Error(`${primaryErr.message} (fallback ${this.fallbackModel} also failed: ${fallbackErr.message})`);
+        composite.retryable = false;
+        throw composite;
+      }
+    }
+  }
+
+  /**
+   * Single attempt at one specific model. Marks errors as `retryable` when
+   * they're transient (timeout / 5xx) so the caller can decide whether to
+   * try the fallback. format:"json" tells Ollama to constrain output to
+   * valid JSON server-side, which trims trailing prose and finishes faster.
+   */
+  async _callLLMOnce(model, prompt) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -272,19 +286,30 @@ ${JSON.stringify(lastMatch)}`;
           "Authorization": `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify({
-          model: this.model,
+          model,
           messages: [{ role: "user", content: prompt }],
           stream: false,
+          format: "json",
         }),
         signal: controller.signal,
       });
-      if (!res.ok) throw new Error(`LLM API ${res.status}`);
+      if (!res.ok) {
+        const err = new Error(`LLM API ${res.status} (${model})`);
+        err.retryable = res.status >= 500 || res.status === 429;
+        if (res.status >= 500) this.reporter?.incrementCounter("llmServerErrors");
+        throw err;
+      }
       const data = await res.json();
       return data.message?.content || "";
     } catch (err) {
       if (err.name === "AbortError") {
-        throw new Error(`LLM timeout after ${this.timeoutMs}ms`);
+        const tErr = new Error(`LLM timeout after ${this.timeoutMs}ms (${model})`);
+        tErr.retryable = true;
+        this.reporter?.incrementCounter("llmTimeouts");
+        throw tErr;
       }
+      // Network errors (fetch failed, DNS, etc.) — treat as retryable.
+      if (err.retryable === undefined) err.retryable = true;
       throw err;
     } finally {
       clearTimeout(timeout);
