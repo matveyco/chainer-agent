@@ -12,6 +12,24 @@
 
 require("dotenv").config({ quiet: true });
 
+// Process-level error handlers. Production was seeing daily silent
+// process.exit(1) crashes — systemd restarted within 10s but we lost
+// the supervisor counters AND no error trace was captured. These two
+// handlers log the cause to stderr (which goes to bots.log via systemd
+// StandardError=append) before letting the process die. Without these,
+// uncaught Promise rejections in async/await chains kill node silently.
+process.on("uncaughtException", (err, origin) => {
+  console.error(`[FATAL] uncaughtException at ${origin}:`, err && (err.stack || err.message || err));
+  // Re-throw so node still exits 1 (so systemd restarts us). Just makes the
+  // crash diagnosable.
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[FATAL] unhandledRejection:", reason && (reason.stack || reason.message || reason));
+  // Don't exit on unhandled rejection — most are recoverable transient
+  // network errors from the LLM coach or trainer fetch. Log and continue.
+});
+
 const fs = require("fs");
 const { Trainer } = require("./evolution/Trainer");
 const { Dashboard } = require("./metrics/Dashboard");

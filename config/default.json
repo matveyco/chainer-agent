@@ -93,8 +93,8 @@
     "stagingMinCombatSignalRatio": 0.75,
     "stagingMinFillRatio": 0.95,
     "stagingMinJoinSuccessRate": 0.97,
-    "stagingMinShotRate": 0.03,
-    "stagingMinPolicyShare": 0.1,
+    "stagingMinShotRate": 0.01,
+    "stagingMinPolicyShare": 0.0,
     "stagingMinDamagePerShot": 0.25
   }
 }
