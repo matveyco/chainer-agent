@@ -131,6 +131,54 @@ test("agent brain win bonus fires only on rank=1 terminal step", () => {
   assert.equal(brain.experienceBuffer[2].reward_components.lastPlace, -20.0);
 });
 
+test("agent brain comeback bonus pays underdog for finishing above expectation", () => {
+  const brain = new AgentBrain("agent_test", "http://localhost:5555", {
+    rewardConfig: { comebackBonus: 8.0, matchRankBonus: 25.0 },
+  });
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+
+  // Seed 5 matches at rank 10 of 12 — agent expects to finish 10th.
+  for (let i = 0; i < 5; i += 1) {
+    brain.recentRanks.push(10);
+  }
+  // This match: finished 5th of 12. Climb = 10 - 5 = 5. Bonus = 8 * 5/12 ≈ 3.33.
+  brain.recordStep({ done: true, rank: 5, roomSize: 12 });
+  const reward = brain.experienceBuffer[brain.experienceBuffer.length - 1].reward_components;
+  assert.ok(Math.abs(reward.comeback - 8.0 * 5 / 12) < 1e-6,
+    `expected comeback ~3.33, got ${reward.comeback}`);
+});
+
+test("agent brain comeback bonus is zero when finishing at or below expectation", () => {
+  const brain = new AgentBrain("agent_test", "http://localhost:5555", {
+    rewardConfig: { comebackBonus: 8.0 },
+  });
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+  for (let i = 0; i < 5; i += 1) brain.recentRanks.push(5);
+
+  // Finished 5th of 12 — at expectation. No bonus.
+  brain.recordStep({ done: true, rank: 5, roomSize: 12 });
+  assert.equal(brain.experienceBuffer[0].reward_components.comeback, 0);
+
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+  // Finished 8th — worse than expectation. No bonus (no penalty either).
+  brain.recordStep({ done: true, rank: 8, roomSize: 12 });
+  assert.equal(brain.experienceBuffer[1].reward_components.comeback, 0);
+});
+
+test("agent brain comeback bonus needs >=5 ranks of history before firing", () => {
+  const brain = new AgentBrain("agent_test", "http://localhost:5555", {
+    rewardConfig: { comebackBonus: 8.0 },
+  });
+  brain.lastState = Array.from({ length: STATE_DIM }, () => 0);
+  brain.lastAction = Array.from({ length: ACTION_DIM }, () => 0);
+  // No history yet — first match's bonus must be 0 (else self-fulfilling).
+  brain.recordStep({ done: true, rank: 1, roomSize: 12 });
+  assert.equal(brain.experienceBuffer[0].reward_components.comeback, 0);
+});
+
 test("agent brain getEpisodeRewardTotals returns rounded shallow snapshot", () => {
   const brain = new AgentBrain("agent_test", "http://localhost:5555");
   brain.episodeRewardTotals = { kills: 1.123456, scoreDelta: 0.0001, win: 50 };

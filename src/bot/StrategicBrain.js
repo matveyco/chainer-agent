@@ -9,17 +9,18 @@ const logger = require("../utils/logger");
 const { getDefaultArchetype } = require("./archetypes");
 
 const OLLAMA_API = "https://api.ollama.com/api/chat";
-// Primary: kimi-k2.6 (NO :cloud suffix). Direct probe vs Ollama Cloud
-// catalog showed:
-//   kimi-k2.6:cloud         -> ~60s for trivial prompt (slow path)
-//   kimi-k2.6 (no suffix)   -> ~4s for the same prompt (fast path)
-//   deepseek-v4-flash       -> ~1.2s
-// The :cloud suffix triggers some slower routing on Ollama's side; without
-// it we hit the latency-optimised endpoint. ~595B params, half k2.5's size.
-const DEFAULT_MODEL = "kimi-k2.6";
-// Fallback: deepseek-v4-flash is the latency-optimised variant (~140B);
-// used as a one-shot retry when the primary times out or 5xx's. ~1s avg.
-const DEFAULT_FALLBACK_MODEL = "deepseek-v4-flash";
+// Primary: deepseek-v4-flash (~140B, latency-optimised). Direct probes:
+//   kimi-k2.6:cloud        -> ~60s   (cloud-routed reasoning model, slow)
+//   kimi-k2.6 (no suffix)  -> ~4-15s (variable; observed 47% timeout rate)
+//   deepseek-v4-flash      -> ~1.2s  (fast and steady)
+// 10-day production showed kimi timed out 310/657 = 47% even with the
+// no-suffix routing — fallback chain caught all but 4 hard failures, but
+// the timeout latency was eating real time. Promoting deepseek to primary
+// since it's both faster and more reliable for our small structured prompt.
+const DEFAULT_MODEL = "deepseek-v4-flash";
+// Fallback: kimi-k2.6 keeps the reasoning-model option available when
+// deepseek 5xx's. Reasoning model can produce subtler strategy diffs.
+const DEFAULT_FALLBACK_MODEL = "kimi-k2.6";
 
 class StrategicBrain {
   constructor(agentId, apiKey, model = DEFAULT_MODEL, options = {}) {
@@ -110,6 +111,10 @@ class StrategicBrain {
     this.totalDeaths += matchResult.deaths || 0;
     this.totalScore += matchResult.score || 0;
 
+    const won = (matchResult.rank === 1);
+    if (won) this.matchesSinceLastWin = 0;
+    else this.matchesSinceLastWin = (this.matchesSinceLastWin || 0) + 1;
+
     this.matchHistory.push({
       match: this.matchesPlayed,
       score: matchResult.score || 0,
@@ -121,6 +126,37 @@ class StrategicBrain {
       survival_time: matchResult.survivalTime || 0,
     });
     if (this.matchHistory.length > 20) this.matchHistory.shift();
+
+    // STRATEGY-COLLAPSE DETECTOR: if we've gone 50+ matches without a win,
+    // the LLM-coached strategy has likely converged to a passive bad
+    // equilibrium. Reset toward archetype defaults with a small aggression
+    // bump and skip THIS LLM call (let the next one re-evaluate from the
+    // bumped baseline). Logged with a counter so we can see how often it
+    // fires. The recovery is bounded — once back winning, this never
+    // triggers again.
+    if (this.matchesSinceLastWin >= 50) {
+      const archetype = getDefaultArchetype(this.personality.archetype_id, this.personality.seed);
+      this.strategy = {
+        ...archetype.defaults,
+        aggression: Math.min(1.0, archetype.defaults.aggression + 0.1),
+      };
+      this.matchesSinceLastWin = 0;
+      this.thoughtLog.push({
+        match: this.matchesPlayed,
+        timestamp: new Date().toISOString(),
+        thought: "Strategy collapse detected (50+ matches no win). Reset to archetype + aggression bump.",
+        plan: this.currentPlan,
+        diff: { _reset: true },
+      });
+      if (this.thoughtLog.length > 30) this.thoughtLog.shift();
+      this.reporter?.incrementCounter("strategyCollapseResets");
+      logger.warn(`[${this.agentId}/${this.personality.archetype}] strategy collapse reset (matchesSinceLastWin=50)`);
+      await this._persistStrategyDiff(
+        { analysis: "collapse-reset", plan: this.currentPlan, strategy: this.strategy },
+        { _reset: true }
+      );
+      return;
+    }
 
     if (this.matchesPlayed % 3 !== 0 || !this.apiKey) return;
 
@@ -224,6 +260,22 @@ Last: ${JSON.stringify(lastMatch)}`;
       const raw = Number(payload.strategy?.[key]);
       strategy[key] = Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : this.strategy[key];
     }
+
+    // PASSIVITY FLOOR — production showed bottom-tier archetypes (Survivor,
+    // Collector, Sniper) collapsed under LLM coaching to extreme passivity
+    // (e.g. agent_11 reached aggression=0.01, retreat_threshold=0.99) and
+    // hit a 0%-win equilibrium with no positive reward to climb out of. The
+    // floor enforces a minimum capability:
+    //   - aggression >= 0.15 → bot will always shoot when an enemy is in
+    //     close range (per TacticalController SHOOT_AGGRESSION_FLOOR)
+    //   - retreat_threshold <= 0.85 → bot won't flee from a single shot at
+    //     full HP. Above 0.85 it never stops retreating.
+    //   - ability_usage >= 0.1 → at least occasional ability use
+    // Cite: Self-Imitation Learning (Oh 2018) — preventing strategy
+    // collapse in low-signal regimes by anchoring to viable behaviour.
+    strategy.aggression = Math.max(strategy.aggression, 0.15);
+    strategy.retreat_threshold = Math.min(strategy.retreat_threshold, 0.85);
+    strategy.ability_usage = Math.max(strategy.ability_usage, 0.1);
 
     return {
       analysis: String(payload.analysis || "").trim() || "No analysis returned.",

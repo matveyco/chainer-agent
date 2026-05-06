@@ -41,6 +41,10 @@ class AgentBrain {
     this.ready = false;
     this.loadingPromise = null;
     this.nextLoadAttemptAt = 0;
+    // Rolling rank history for comeback bonus — agent gets a positive
+    // reward for finishing better than its own recent average. Last 20
+    // ranks; the bonus is +max(0, expectedRank - actualRank) / roomSize.
+    this.recentRanks = [];
   }
 
   async _fetchRewardWeights() {
@@ -193,6 +197,11 @@ class AgentBrain {
       win: isWin ? (this.rewardConfig.winBonus ?? 50.0) : 0,
       // Last-place penalty — finishing dead last is much worse than mid-pack.
       lastPlace: isLastPlace ? (this.rewardConfig.lastPlacePenalty ?? -20.0) : 0,
+      // Comeback bonus — finishing better than rolling expectation.
+      // Pays an underdog for climbing one rank above its average. Only
+      // fires on terminal step. Critical for breaking 0%-win equilibria
+      // where matchRank pays nothing for finishing 8/12 vs 9/12.
+      comeback: this._computeComebackBonus(transition),
     };
 
     const reward = Object.values(rewardComponents).reduce((sum, value) => sum + value, 0);
@@ -406,6 +415,38 @@ class AgentBrain {
       rank: 0,
       roomSize: 0,
     };
+  }
+
+  /**
+   * Comeback bonus — pays an underdog for finishing better than its rolling
+   * expectation. Updates the rolling rank window AS A SIDE EFFECT (only on
+   * terminal step). Returns 0 unless this is a terminal step with rank info.
+   *
+   * Formula: bonus = comebackBonus × max(0, expectedRank - actualRank) / roomSize
+   *
+   * Example: agent normally finishes 8th of 12 (expectedRank=8). This
+   * match they finished 5th. bonus = 8.0 × (8-5)/12 ≈ 2.0. Compare to
+   * matchRank reward at rank=5/12: ≈ 0 (mid-pack). Without comebackBonus
+   * the agent gets nothing for improving — with it, +2.0.
+   *
+   * Why expectedRank=AVERAGE not MEDIAN: a bot stuck at 11th (avg=11) gets
+   * a bonus for any finish above 11, including 9th — small wins matter
+   * for breaking the equilibrium.
+   */
+  _computeComebackBonus(transition) {
+    if (!transition.done || !(transition.rank > 0) || !(transition.roomSize > 1)) return 0;
+    const weight = this.rewardConfig.comebackBonus ?? 8.0;
+    if (weight <= 0 || this.recentRanks.length < 5) {
+      // Need at least 5 matches of history to have a meaningful expectation.
+      this.recentRanks.push(transition.rank);
+      if (this.recentRanks.length > 20) this.recentRanks.shift();
+      return 0;
+    }
+    const expected = this.recentRanks.reduce((s, r) => s + r, 0) / this.recentRanks.length;
+    this.recentRanks.push(transition.rank);
+    if (this.recentRanks.length > 20) this.recentRanks.shift();
+    const climb = Math.max(0, expected - transition.rank);
+    return weight * climb / transition.roomSize;
   }
 
   /**

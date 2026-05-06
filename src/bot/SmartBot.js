@@ -42,7 +42,7 @@ class SmartBot {
           archetypeId: this.archetypeId,
           trainerUrl: config.trainerUrl,
           reporter: options.reporter || null,
-          timeoutMs: config.runtime?.strategyCoachTimeoutMs || 90000,
+          timeoutMs: config.runtime?.strategyCoachTimeoutMs || 30000,
           fallbackModel: config.ollamaFallbackModel || undefined,
         }
       );
@@ -486,11 +486,20 @@ class SmartBot {
       this._stuckSamples = [];
       this._stuckEscapeUntil = 0;
       this._stuckEscapeDir = null;
+      this._stuckEscapeBackoffUntil = 0;
     }
     // Honor an active escape window before sampling — we don't want to keep
     // re-detecting "stuck" while we're literally executing the escape.
     if (now < this._stuckEscapeUntil && this._stuckEscapeDir) {
       return this._stuckEscapeDir;
+    }
+    // BACKOFF: production showed escape firing 5/bot/match — bots that
+    // legitimately strafe in a tight area kept tripping it. After an escape
+    // commits, suppress re-detection for 5 seconds (escape window 1s + 4s
+    // settle). This catches genuine wedges (which last >> 5s) while not
+    // over-firing on tight strafing.
+    if (now < this._stuckEscapeBackoffUntil) {
+      return null;
     }
     this._stuckSamples.push({
       x: this.positionArray[0],
@@ -547,6 +556,9 @@ class SmartBot {
     }
     this._stuckEscapeDir = dir;
     this._stuckEscapeUntil = now + 1000; // commit to escape for 1 s
+    // 5s suppression window after escape so we don't re-fire on tight
+    // strafing. Real wedges last >> 5s so they'll be caught next time.
+    this._stuckEscapeBackoffUntil = now + 5000;
     this._stuckSamples = []; // reset so the next stuck check waits a fresh 3 s
     this.reporter?.incrementCounter("stuckEscapes");
     return dir;

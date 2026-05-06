@@ -831,8 +831,18 @@ class RoomCoordinator {
       };
 
       if (primary?.room) {
-        primary.room.onMessage("room:dispose", () => finish("dispose"));
-        primary.room.onLeave(() => finish("leave"));
+        // Always count the raw event even if matchResolved is already true
+        // (helps diagnose why production sees matchEnd:hard-cap on every
+        // match — either dispose/leave never fire, or they fire after
+        // hard-cap, or our handler binding isn't working).
+        primary.room.onMessage("room:dispose", () => {
+          this.runtimeState.incrementCounter("primaryRoomDispose");
+          finish("dispose");
+        });
+        primary.room.onLeave(() => {
+          this.runtimeState.incrementCounter("primaryRoomLeave");
+          finish("leave");
+        });
       }
 
       const watchdog = setInterval(() => {
@@ -989,13 +999,17 @@ class RoomCoordinator {
 
       if (session.bot.strategicBrain && this.mode === "training") {
         this.strategicBrains.set(session.bot.agentId, session.bot.strategicBrain);
-        // Fire LLM analysis in the background. Awaiting it serially blocks the
-        // next match by ~30-90s per agent (kimi-k2.5 reasoning latency × 12
-        // agents). The strategy diff lands on the bot/trainer well before the
-        // agent needs it for its NEXT match.
-        session.bot.strategicBrain
-          .analyzeMatch({ ...summary, rank, roomSize })
-          .catch(() => {});
+        // Fire LLM analysis in the background, jittered. Pre-jitter all 12
+        // agents fired simultaneously after match end → API burst → some
+        // 5xx'd. Distribute across 0-8s so the LLM cloud sees a steady drip
+        // instead of a thundering herd. The strategy diff still lands well
+        // before the agent's NEXT match (which is ~140s away).
+        const jitterMs = Math.floor(Math.random() * 8000);
+        setTimeout(() => {
+          session.bot.strategicBrain
+            .analyzeMatch({ ...summary, rank, roomSize })
+            .catch(() => {});
+        }, jitterMs);
       }
 
       agentResults.push({ ...this._buildAgentResult(session, summary), rank, roomSize });

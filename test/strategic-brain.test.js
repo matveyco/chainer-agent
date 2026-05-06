@@ -130,10 +130,48 @@ test("strategic brain sends format:'json' to enforce JSON-only output", async (t
   assert.equal(bodySeen.model, "test-model");
 });
 
+test("strategic brain enforces passivity floor on parsed strategy", () => {
+  // Without floor, an LLM saying aggression=0.0 gets accepted. With floor,
+  // it's clamped to 0.15 so the bot still shoots when an enemy is in range.
+  const brain = new StrategicBrain("agent_99", "fake-key");
+  const parsed = brain._parseStrategy(JSON.stringify({
+    analysis: "ultra-passive plan",
+    plan: "hide forever",
+    strategy: {
+      aggression: 0.0,
+      accuracy_focus: 0.5,
+      crystal_priority: 0.5,
+      ability_usage: 0.0,
+      retreat_threshold: 1.0,
+    },
+  }));
+  assert.equal(parsed.strategy.aggression, 0.15);
+  assert.equal(parsed.strategy.retreat_threshold, 0.85);
+  assert.equal(parsed.strategy.ability_usage, 0.1);
+  // Other dims unchanged.
+  assert.equal(parsed.strategy.accuracy_focus, 0.5);
+  assert.equal(parsed.strategy.crystal_priority, 0.5);
+});
+
+test("strategic brain leaves above-floor strategies untouched", () => {
+  const brain = new StrategicBrain("agent_100", "fake-key");
+  const parsed = brain._parseStrategy(JSON.stringify({
+    analysis: "x",
+    plan: "y",
+    strategy: { aggression: 0.7, accuracy_focus: 0.5, crystal_priority: 0.5, ability_usage: 0.5, retreat_threshold: 0.4 },
+  }));
+  assert.equal(parsed.strategy.aggression, 0.7);
+  assert.equal(parsed.strategy.retreat_threshold, 0.4);
+  assert.equal(parsed.strategy.ability_usage, 0.5);
+});
+
 test("strategic brain default models point to the new fast variants", () => {
   const brain = new StrategicBrain("agent_10", "fake-key");
-  // No :cloud suffix — Ollama probe showed the suffix triggers a slower
-  // routing path (60s vs 4s for the same prompt).
-  assert.equal(brain.model, "kimi-k2.6");
-  assert.equal(brain.fallbackModel, "deepseek-v4-flash");
+  // Updated 2026-05-06: deepseek-v4-flash promoted to PRIMARY after 10
+  // days of production showed kimi-k2.6 timed out 47% of attempts. The
+  // fallback chain saved us but kimi's variable latency (4-60s) was
+  // costing real-time. deepseek averages ~1.2s. kimi-k2.6 retained as
+  // fallback for its reasoning-model strategy depth.
+  assert.equal(brain.model, "deepseek-v4-flash");
+  assert.equal(brain.fallbackModel, "kimi-k2.6");
 });

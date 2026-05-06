@@ -106,6 +106,16 @@ REWARD_WEIGHT_DEFAULTS = {
     "matchRankBonus": 25.0,             # rank-fraction bonus, see _computeRankReward
     "winBonus": 50.0,                   # +1 ONLY on rank=1 — winning is the thing that matters
     "lastPlacePenalty": -20.0,          # +1 on rank=roomSize — losing badly stings
+    # --- Comeback bonus (added 2026-05-06) ---
+    # Production showed a stable bad equilibrium: bottom 6 archetypes had
+    # 0% win rate over 200 matches. matchRankBonus only pays for top half;
+    # a bot at rank 8/12 gets matchRank ≈ -10 and never gets positive
+    # reinforcement to climb. comebackBonus pays for *finishing better
+    # than rolling expectation*: if the bot's lifetime average rank is X
+    # and this match they finished at X-2 (better), reward proportional.
+    # Cite: Self-Imitation (Oh 2018) — reinforce above-baseline trajectories
+    # to escape low-signal plateaus.
+    "comebackBonus": 8.0,               # +1 × max(0, expectedRank - actualRank) / roomSize
     # --- Hybrid policy blend genome ---
     "policyBlendAlpha": 0.1,
 }
@@ -129,6 +139,7 @@ REWARD_WEIGHT_BOUNDS = {
     "matchRankBonus": (1.0, 200.0),
     "winBonus": (0.0, 200.0),
     "lastPlacePenalty": (-100.0, 0.0),
+    "comebackBonus": (0.0, 50.0),
     "policyBlendAlpha": (0.0, 1.0),
 }
 PBT_LOG = LOGS_DIR / "pbt.jsonl"
