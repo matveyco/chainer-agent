@@ -66,7 +66,7 @@
     "combatRecoveryWindow": 4,
     "combatRecoveryMinSignalRatio": 0.25,
     "combatRecoveryCooldownMs": 300000,
-    "strategyCoachTimeoutMs": 30000
+    "strategyCoachTimeoutMs": 75000
   },
   "persistence": {
     "savePopulationEvery": 10,

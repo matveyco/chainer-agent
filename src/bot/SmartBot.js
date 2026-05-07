@@ -42,7 +42,7 @@ class SmartBot {
           archetypeId: this.archetypeId,
           trainerUrl: config.trainerUrl,
           reporter: options.reporter || null,
-          timeoutMs: config.runtime?.strategyCoachTimeoutMs || 30000,
+          timeoutMs: config.runtime?.strategyCoachTimeoutMs || 75000,
           fallbackModel: config.ollamaFallbackModel || undefined,
         }
       );

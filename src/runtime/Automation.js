@@ -122,22 +122,26 @@ function shouldStageChallenger({
   }
 
   const metrics = computeRecentRuntimeHealth(recentMatches, counters);
-  if (metrics.combatSignalRatio < Number(config.evaluation?.stagingMinCombatSignalRatio || 0.75)) {
+  // Use ?? for the fallback so a configured threshold of 0 isn't silently
+  // promoted to the default. Critical bug: prior 0 || 0.1 → 0.1 meant the
+  // policy_share_low gate kept rejecting eval staging even after we set
+  // the config to 0.0 to support the hybrid scripted+NN policy.
+  if (metrics.combatSignalRatio < Number(config.evaluation?.stagingMinCombatSignalRatio ?? 0.75)) {
     return { ok: false, reason: "combat_signal_low", metrics };
   }
-  if (metrics.avgFillRatio < Number(config.evaluation?.stagingMinFillRatio || 0.95)) {
+  if (metrics.avgFillRatio < Number(config.evaluation?.stagingMinFillRatio ?? 0.95)) {
     return { ok: false, reason: "fill_ratio_low", metrics };
   }
-  if (metrics.joinSuccessRate < Number(config.evaluation?.stagingMinJoinSuccessRate || 0.97)) {
+  if (metrics.joinSuccessRate < Number(config.evaluation?.stagingMinJoinSuccessRate ?? 0.97)) {
     return { ok: false, reason: "join_success_low", metrics };
   }
-  if (metrics.avgShotRate < Number(config.evaluation?.stagingMinShotRate || 0.03)) {
+  if (metrics.avgShotRate < Number(config.evaluation?.stagingMinShotRate ?? 0.03)) {
     return { ok: false, reason: "shot_rate_low", metrics };
   }
-  if (metrics.avgPolicyShare < Number(config.evaluation?.stagingMinPolicyShare || 0.1)) {
+  if (metrics.avgPolicyShare < Number(config.evaluation?.stagingMinPolicyShare ?? 0.1)) {
     return { ok: false, reason: "policy_share_low", metrics };
   }
-  if (metrics.avgDamagePerShot < Number(config.evaluation?.stagingMinDamagePerShot || 0.25)) {
+  if (metrics.avgDamagePerShot < Number(config.evaluation?.stagingMinDamagePerShot ?? 0.25)) {
     return { ok: false, reason: "damage_per_shot_low", metrics };
   }
 

@@ -18,10 +18,25 @@ require("dotenv").config({ quiet: true });
 // handlers log the cause to stderr (which goes to bots.log via systemd
 // StandardError=append) before letting the process die. Without these,
 // uncaught Promise rejections in async/await chains kill node silently.
+//
+// AFTER deploying these handlers we discovered most crashes were
+// Colyseus state-schema decode errors ('refId not found') hitting
+// uncaughtException via the WebSocket message callback (we can't catch
+// them inside Colyseus internals). These errors are isolated to one
+// session — patch decoder fails, but the bot can survive if we don't
+// exit. Whitelist them for recovery.
+const RECOVERABLE_PATTERNS = [
+  /refId.*not found/, // colyseus.js schema decode mismatch
+];
+
 process.on("uncaughtException", (err, origin) => {
+  const msg = (err && (err.message || String(err))) || "";
+  const recoverable = RECOVERABLE_PATTERNS.some((re) => re.test(msg));
+  if (recoverable) {
+    console.error(`[RECOVER] uncaughtException survived (${msg.slice(0, 100)}) at ${origin}`);
+    return;
+  }
   console.error(`[FATAL] uncaughtException at ${origin}:`, err && (err.stack || err.message || err));
-  // Re-throw so node still exits 1 (so systemd restarts us). Just makes the
-  // crash diagnosable.
   process.exit(1);
 });
 process.on("unhandledRejection", (reason, promise) => {
