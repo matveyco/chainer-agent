@@ -1046,19 +1046,33 @@ class PPOTrainer:
         """Delete old version dirs that are neither aliased nor in the
         most recent KEEP_RECENT_VERSIONS slice. Runs for the family AND
         for every bound agent. Failures are non-fatal — we never stop
-        the training step on a cleanup error."""
+        the training step on a cleanup error.
+
+        BUGFIX 2026-05-07: per-agent prune previously only honoured the
+        agent's own aliases.json. The FAMILY alias (e.g. champion=v101540)
+        points into the per-agent ONNX exports — if a per-agent local
+        alias points elsewhere, the family-aliased version got pruned and
+        the eval system couldn't load champion for that agent (room came
+        up incomplete, eval failed). Fix: union the family aliases into
+        the per-agent protected set before pruning."""
         try:
             family = self.families[family_id]
             family_aliases = self._read_family_aliases(family_id)
+            family_aliased_versions = {int(v) for v in family_aliases.values() if v}
             self._prune_versions_dir(
                 self._family_versions_root(family_id),
-                {int(v) for v in family_aliases.values() if v},
+                family_aliased_versions,
             )
             for agent_id in family.bound_agents:
                 aliases = self._read_agent_aliases(agent_id)
+                per_agent_aliased = {int(v) for v in aliases.values() if v}
+                # Protect both per-agent aliases AND family-level aliases
+                # (champion/candidate/challenger/latest) from pruning. The
+                # eval system loads agents at the FAMILY champion version,
+                # so that version must exist on disk for every agent.
                 self._prune_versions_dir(
                     self._agent_versions_root(agent_id),
-                    {int(v) for v in aliases.values() if v},
+                    per_agent_aliased | family_aliased_versions,
                 )
         except Exception as exc:
             print(f"[Trainer] prune failed for {family_id}: {exc}")
